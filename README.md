@@ -47,7 +47,7 @@ Spread              = F_near − F_far
 |:--|:--|:--|
 | Лященко Андрей | [@stirringrook](https://github.com/stirringrook) | _заполнить_ |
 | Карих Дмитрий | [@papafranchesco](https://github.com/papafranchesco) | _заполнить_ |
-| Андреев Иван | [@xenonblaq](https://github.com/xenonblaq) | _заполнить_ |
+| Андреев Иван | [@xenonblaq](https://github.com/xenonblaq) | CEO |
 | Сергунцов Роман | [@serguntsov](https://github.com/serguntsov) | _заполнить_ |
 
 ## Куратор
