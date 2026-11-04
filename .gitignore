@@ -26,3 +26,6 @@ data/processed/*
 !data/processed/.gitkeep
 # Packaging
 *.egg-info/
+
+# vibe
+.claude
