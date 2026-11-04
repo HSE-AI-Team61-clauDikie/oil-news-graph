@@ -14,6 +14,58 @@
 
 ---
 
+## Работа с репозиторием
+
+### 1. Установка uv
+
+Один раз на машину. [uv](https://docs.astral.sh/uv/) — единственное, что
+ставится вручную: Python и пакеты он поднимет сам.
+
+Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+macOS / Linux:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Можно и так: `brew install uv` (macOS), `pipx install uv` (любая ОС). После
+установки перезапустите терминал и проверьте:
+
+```bash
+uv --version
+```
+
+Отдельно ставить Python не нужно: uv скачает версию, которую требует проект
+(3.12, см. `.python-version`), и не тронет системный.
+
+### 2. Окружение проекта
+
+Один раз после клона, из корня репозитория:
+
+```bash
+uv sync --all-groups
+uv run pre-commit install
+```
+
+- `uv sync --all-groups` создаёт `.venv` и ставит все зависимости из `uv.lock`.
+- `uv run pre-commit install` включает проверку на `git commit`: `ruff check --fix`
+  и `ruff format` по изменённым `.py`-файлам. Настройки ruff лежат в
+  `pyproject.toml` и одни на всех.
+
+### 3. Повседневная работа
+
+Команды запускаются через `uv run`: `uv run python ...`, `uv run pytest`,
+`uv run jupyter lab`. Новая зависимость добавляется так: `uv add <пакет>`, а
+для инструментов разработки — `uv add --group lint <пакет>`. Изменённые
+`pyproject.toml` и `uv.lock` коммитятся вместе.
+
+---
+
 ## Итоговая тема
 
 > **Прогнозирование неожиданного изменения запасов нефти (inventory surprise) на основе

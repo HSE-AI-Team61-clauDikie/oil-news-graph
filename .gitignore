@@ -24,3 +24,8 @@ data/processed/*
 !data/raw/.gitkeep
 !data/interim/.gitkeep
 !data/processed/.gitkeep
+# Packaging
+*.egg-info/
+
+# vibe
+.claude
