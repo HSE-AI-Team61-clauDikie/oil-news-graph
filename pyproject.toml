@@ -1,0 +1,98 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oil-news-graph"
+version = "0.1.0"
+description = "Новостной граф нефтяного рынка: прогноз inventory surprise и спрэда WTI"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "requests>=2.34.2",
+    "python-dotenv>=1.2.4",
+    "tqdm>=4.70.1",
+    "numpy>=2.5.4",
+    "pandas>=3.1.0",
+    "pyarrow>=26.0.0",
+    "openpyxl>=3.1.5",
+    "mediacloud>=5.2.0",
+    "httpx>=0.28.1",
+    "trafilatura>=2.3.1",
+    "tenacity>=9.2.1",
+    "pydantic-settings>=2.16.2",
+]
+
+[dependency-groups]
+eda = [
+    "matplotlib>=3.11.2",
+    "scipy>=1.18.1",
+    "scikit-learn>=1.9.1",
+    "statsmodels>=0.15.0",
+]
+notebooks = [
+    "jupyterlab>=4.6.5",
+    "ipykernel>=7.4.0",
+]
+lint = [
+    "ruff>=0.17.3",
+    "pre-commit>=4.7.0",
+]
+tests = [
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1",
+]
+
+[tool.uv]
+default-groups = ["eda", "notebooks", "lint", "tests"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["news*"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "N", "UP", "B", "A", "SIM", "RET", "ARG", "ANN",
+    "S", "BLE", "FBT", "COM", "C4", "DTZ", "EM", "FIX", "ISC", "ICN", "LOG",
+    "G", "PIE", "T20", "PYI", "PT", "Q", "RSE", "SLOT", "TID", "FLY", "PERF",
+    "RUF", "ERA", "FURB", "PLE", "PLW", "C90",
+    "ASYNC210", "ASYNC220", "ASYNC221", "ASYNC230", "ASYNC251",
+]
+ignore = [
+    "ANN001", "ANN002", "ANN003",   # аргументы не аннотируем, возвраты - всегда
+    "COM812",                       # конфликтует с форматтером
+    "G004",                         # f-строки в логах читаемее ленивого %s
+    "RUF001", "RUF002", "RUF003",   # кириллица - норма, а не омоглиф
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]           # assert - язык pytest
+
+[tool.ruff.lint.flake8-boolean-trap]
+extend-allowed-calls = ["pydantic.Field"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 6
+max-branches = 5
+
+[tool.pytest.ini_options]
+pythonpath = "src"
+# Списком, не строкой: строку pytest не поймёт как путь и соберёт всё от корня
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

@@ -1,0 +1,16 @@
+# Только свой код: src/data и ноутбуки коллег линтер не трогает
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+        files: ^(src/news|tests/news)/
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+        files: ^(src/news|tests/news)/
