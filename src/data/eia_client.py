@@ -433,6 +433,46 @@ EIA_WEEKLY_SERIES: dict[str, dict[str, str]] = {
         "series": "WCRFPUS2",
         "frequency": "weekly",
     },
+    "crude_imports": {
+        "route": "petroleum/move/wkly",
+        "series": "WCRIMUS2",
+        "frequency": "weekly",
+    },
+    "crude_exports": {
+        "route": "petroleum/move/wkly",
+        "series": "WCREXUS2",
+        "frequency": "weekly",
+    },
+    "refinery_inputs": {
+        "route": "petroleum/pnp/wiup",
+        "series": "WCRRIUS2",
+        "frequency": "weekly",
+    },
+    "refinery_utilization": {
+        "route": "petroleum/pnp/wiup",
+        "series": "WPULEUS3",
+        "frequency": "weekly",
+    },
+    "gasoline_stocks": {
+        "route": "petroleum/stoc/wstk",
+        "series": "WGTSTUS1",
+        "frequency": "weekly",
+    },
+    "distillate_stocks": {
+        "route": "petroleum/stoc/wstk",
+        "series": "WDISTUS1",
+        "frequency": "weekly",
+    },
+    "spr_stocks": {
+        "route": "petroleum/stoc/wstk",
+        "series": "WCSSTUS1",
+        "frequency": "weekly",
+    },
+    "total_products_supplied": {
+        "route": "petroleum/cons/wpsup",
+        "series": "WRPUPUS2",
+        "frequency": "weekly",
+    },
 }
 
 
