@@ -23,9 +23,11 @@ class NewsSettings(BaseSettings):
         ),
         description="Lucene-запрос Media Cloud",
     )
+    # Без коллекций или источников Media Cloud отвечает 422
     collection_ids: list[int] = Field(
-        default_factory=list,
-        description="Коллекции Media Cloud; пусто - все источники",
+        default=[34412232, 38380780, 38380781],
+        min_length=1,
+        description="Коллекции Media Cloud; по умолчанию - российские",
     )
     start_date: date = date(2015, 2, 19)
     end_date: date = date(2026, 10, 31)

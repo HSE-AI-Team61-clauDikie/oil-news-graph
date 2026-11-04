@@ -69,9 +69,19 @@ uv run python -m news fulltext --retry-failed
 uv run python -m news assemble               # итоговый датасет
 ```
 
-`count` и `download` принимают `--start` и `--end` (`YYYY-MM-DD`). Команда
-`collections --name Russia` ищет коллекции Media Cloud, если поиск по всем
-источникам придётся сузить через `COLLECTION_IDS='[id, ...]'` (JSON-список).
+`count` и `download` принимают `--start` и `--end` (`YYYY-MM-DD`).
+
+Поиск без коллекций Media Cloud не выполняет (422 `Must have at least one of
+'ss' or 'cs'`). По умолчанию берутся российские коллекции:
+
+| id | Коллекция | Источников |
+|---|---|---|
+| 34412232 | Russian Federation - National | 242 |
+| 38380780 | Russia - State & Local | 36 |
+| 38380781 | Moskva, Russia - State & Local | 36 |
+
+Другие коллекции ищет `collections --name Kazakhstan`; набор задаётся через
+`COLLECTION_IDS='[id, ...]'` (JSON-список).
 
 Любое поле `NewsSettings` (`settings.py`) переопределяется переменной окружения
 с тем же именем: `QUERY`, `CONCURRENCY`, `WAYBACK_INTERVAL` и т.д.
