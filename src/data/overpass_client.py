@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any
 
 import pandas as pd
 import requests
@@ -25,15 +24,21 @@ REGION_BBOXES = {
     "east_coast": (25.0, -82.0, 47.5, -66.0),
 }
 
+INACTIVE_OSM_FLAGS = (
+    "abandoned",
+    "demolished",
+    "disused",
+)
+
 
 class OverpassClient:
-    """Overpass API client for infrastructure gap filling."""
+    """Overpass API client used only for infrastructure gap filling."""
 
     def __init__(
         self,
         timeout: int = 180,
         pause: float = 3.0,
-        max_attempts_per_endpoint: int = 5,
+        max_attempts_per_endpoint: int = 10,
     ) -> None:
         self.timeout = timeout
         self.pause = pause
@@ -62,7 +67,7 @@ class OverpassClient:
         self,
         endpoint: str,
         query: str,
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, object] | None:
         for attempt in range(1, self.max_attempts_per_endpoint + 1):
             try:
                 response = self._post_query(endpoint, query)
@@ -78,8 +83,17 @@ class OverpassClient:
                 continue
 
             if response.ok:
-                logger.info("Overpass query succeeded on %s", endpoint)
-                return response.json()
+                payload = response.json()
+
+                if not isinstance(payload, dict):
+                    msg = "Overpass returned a non-object JSON payload."
+                    raise TypeError(msg)
+
+                logger.info(
+                    "Overpass query succeeded on %s",
+                    endpoint,
+                )
+                return payload
 
             if response.status_code in RETRYABLE_STATUS_CODES:
                 logger.warning(
@@ -97,18 +111,30 @@ class OverpassClient:
                 f"Overpass returned HTTP {response.status_code} "
                 f"from {endpoint}. Response: {body}"
             )
-            raise requests.HTTPError(msg, response=response)
+            raise requests.HTTPError(
+                msg,
+                response=response,
+            )
 
         return None
 
-    def _query(self, query: str) -> dict[str, Any]:
+    def _query(
+        self,
+        query: str,
+    ) -> dict[str, object]:
         errors: list[str] = []
 
         for endpoint in OVERPASS_ENDPOINTS:
-            logger.info("Trying Overpass endpoint: %s", endpoint)
+            logger.info(
+                "Trying Overpass endpoint: %s",
+                endpoint,
+            )
 
             try:
-                payload = self._query_endpoint(endpoint, query)
+                payload = self._query_endpoint(
+                    endpoint,
+                    query,
+                )
             except requests.RequestException as exc:
                 errors.append(f"{endpoint}: {exc}")
                 continue
@@ -131,20 +157,50 @@ class OverpassClient:
         return f"{south},{west},{north},{east}"
 
     @staticmethod
+    def _is_inactive(
+        tags: dict[str, object],
+    ) -> bool:
+        return any(
+            str(tags.get(flag, "")).lower() == "yes" for flag in INACTIVE_OSM_FLAGS
+        )
+
+    @classmethod
     def _to_frame(
-        payload: dict[str, Any],
+        cls,
+        payload: dict[str, object],
         *,
         category: str,
         region: str,
     ) -> pd.DataFrame:
-        rows = []
+        elements = payload.get("elements", [])
 
-        for element in payload.get("elements", []):
-            center = element.get("center") or {}
-            tags = element.get("tags") or {}
+        if not isinstance(elements, list):
+            msg = "Overpass payload has invalid elements field."
+            raise TypeError(msg)
 
-            latitude = element.get("lat", center.get("lat"))
-            longitude = element.get("lon", center.get("lon"))
+        rows: list[dict[str, object]] = []
+
+        for element in elements:
+            if not isinstance(element, dict):
+                continue
+
+            raw_tags = element.get("tags") or {}
+            tags = raw_tags if isinstance(raw_tags, dict) else {}
+
+            if cls._is_inactive(tags):
+                continue
+
+            raw_center = element.get("center") or {}
+            center = raw_center if isinstance(raw_center, dict) else {}
+
+            latitude = element.get(
+                "lat",
+                center.get("lat"),
+            )
+            longitude = element.get(
+                "lon",
+                center.get("lon"),
+            )
 
             rows.append(
                 {
@@ -156,7 +212,10 @@ class OverpassClient:
                     "longitude": longitude,
                     "category": category,
                     "region": region,
-                    "tags": json.dumps(tags, ensure_ascii=False),
+                    "tags": json.dumps(
+                        tags,
+                        ensure_ascii=False,
+                    ),
                 }
             )
 
@@ -166,45 +225,47 @@ class OverpassClient:
         self,
         region: str,
     ) -> pd.DataFrame:
-        """Fetch OSM objects tagged as refineries."""
+        """Fetch strict OSM refinery candidates only."""
 
         bbox = self._bbox_text(REGION_BBOXES[region])
-
         query = f"""
         [out:json][timeout:180];
         (
           nwr["industrial"="refinery"]({bbox});
-          nwr["man_made"="works"]["product"~"oil|petroleum"]({bbox});
         );
         out center tags;
         """
 
         return self._to_frame(
             self._query(query),
-            category="refinery",
+            category="refinery_candidate",
             region=region,
         )
 
-    def fetch_oil_storage(
+    def fetch_oil_storage_tanks(
         self,
         region: str,
     ) -> pd.DataFrame:
-        """Fetch explicitly oil-tagged storage and terminal objects."""
+        """Fetch explicitly oil/crude-tagged storage-tank candidates.
+
+        Individual OSM tanks are not treated as terminal facilities. They must
+        be clustered or matched to an authoritative facility before graph use.
+        """
 
         bbox = self._bbox_text(REGION_BBOXES[region])
-
         query = f"""
         [out:json][timeout:180];
         (
-          nwr["man_made"="storage_tank"]["content"~"oil|crude"]({bbox});
-          nwr["man_made"="storage_tank"]["substance"~"oil|crude"]({bbox});
-          nwr["industrial"="oil"]({bbox});
+          nwr["man_made"="storage_tank"]
+             ["content"~"^(crude|crude_oil|oil|petroleum)$",i]({bbox});
+          nwr["man_made"="storage_tank"]
+             ["substance"~"^(crude|crude_oil|oil|petroleum)$",i]({bbox});
         );
         out center tags;
         """
 
         return self._to_frame(
             self._query(query),
-            category="oil_storage_or_terminal",
+            category="oil_storage_tank_candidate",
             region=region,
         )
