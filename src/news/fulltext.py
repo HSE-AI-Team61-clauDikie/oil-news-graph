@@ -441,39 +441,3 @@ def text_fingerprint(text: str) -> str:
 
     normalized = re.sub(r"\W+", " ", text.lower()).strip()
     return hashlib.sha1(normalized.encode(), usedforsecurity=False).hexdigest()
-
-
-def assemble(settings: NewsSettings) -> pd.DataFrame:
-    """
-    Собрать датасет: индекс Media Cloud и тексты статей.
-
-    Шаблоны сайта вместо статьи отбрасываются. Перепечатки одного текста
-    остаются, у всех, кроме самой ранней, заполнено `duplicate_of`.
-
-    Parameters:
-        - settings: пути индекса, part-файлов и результата.
-
-    Returns:
-        Статьи с текстом.
-    """
-
-    stories = pd.read_parquet(settings.stories_path)
-    articles = read_articles(settings)
-    junk = junk_mask(articles, settings.junk_repeats)
-    articles = articles[(articles["text_source"] != "none") & ~junk]
-    articles = articles.drop(columns="url")
-    dataset = (
-        stories.merge(articles, on="story_id", how="inner", validate="one_to_one")
-        .sort_values(["publish_date", "story_id"], kind="stable")
-        .reset_index(drop=True)
-    )
-    dataset["text_hash"] = dataset["text"].map(text_fingerprint)
-    first = dataset.groupby("text_hash")["story_id"].transform("first")
-    dataset["duplicate_of"] = first.where(first != dataset["story_id"])
-    settings.dataset_path.parent.mkdir(parents=True, exist_ok=True)
-    dataset.to_parquet(settings.dataset_path, index=False)
-    logger.info(
-        f"{settings.dataset_path}: {len(dataset)} статей, "
-        f"перепечаток {dataset['duplicate_of'].notna().sum()}",
-    )
-    return dataset

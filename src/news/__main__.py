@@ -6,7 +6,7 @@ from datetime import date
 import pandas as pd
 from mediacloud.api import DirectoryApi, SearchApi
 
-from news import fulltext, mediacloud
+from news import dataset, fulltext, mediacloud
 from news.settings import NewsSettings
 
 logger = logging.getLogger("news")
@@ -114,7 +114,7 @@ def main() -> None:
                 newest_first=args.newest_first,
             ),
         ),
-        "assemble": lambda: fulltext.assemble(settings),
+        "assemble": lambda: dataset.assemble(settings),
     }
     commands[args.command]()
 

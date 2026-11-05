@@ -8,7 +8,6 @@ import pytest
 
 from news.fulltext import (
     ArticleFetcher,
-    assemble,
     junk_mask,
     needs_wayback,
     read_articles,
@@ -371,61 +370,3 @@ def test_needs_wayback_skips_tried_and_marks_junk(settings: NewsSettings) -> Non
     todo = needs_wayback(articles, settings).set_index("story_id")["error"]
 
     assert todo.to_dict() == {"dead": "HTTP 404", "homepage": "не статья"}
-
-
-def test_assemble_marks_reprints_and_drops_junk(settings: NewsSettings) -> None:
-    pd.DataFrame(
-        {
-            "story_id": ["tass", "region", "other", "empty", "homepage"],
-            "url": [
-                "https://tass.ru/1",
-                "https://r.ru/1",
-                "https://o.ru/1",
-                "x",
-                "http://www.vesti.ru/doc.html?id=1",
-            ],
-            "publish_date": pd.to_datetime(
-                ["2026-10-01", "2026-10-02", "2026-10-02", "2026-10-02", "2015-08-06"],
-            ),
-            "title": ["Нефть"] * 5,
-        },
-    ).to_parquet(settings.stories_path)
-    settings.fulltext_dir.mkdir()
-    articles_frame(
-        [
-            {
-                "story_id": "region",
-                "url": "https://r.ru/1",
-                "text": TEXT.upper(),
-                "text_source": "live",
-            },
-            {
-                "story_id": "tass",
-                "url": "https://tass.ru/1",
-                "text": TEXT,
-                "text_source": "wayback",
-            },
-            {
-                "story_id": "other",
-                "url": "https://o.ru/1",
-                "text": "Другой текст про НПЗ",
-                "text_source": "live",
-            },
-            {"story_id": "empty", "url": "x"},
-            {
-                "story_id": "homepage",
-                "url": "http://www.vesti.ru/doc.html?id=1",
-                "final_url": "https://www.vesti.ru/",
-                "text": "Главные новости дня",
-                "text_source": "live",
-            },
-        ],
-    ).to_parquet(settings.fulltext_dir / "part-00000.parquet")
-
-    dataset = assemble(settings).set_index("story_id")
-
-    assert sorted(dataset.index) == ["other", "region", "tass"]
-    assert dataset.loc["region", "duplicate_of"] == "tass"
-    assert pd.isna(dataset.loc["tass", "duplicate_of"])
-    assert pd.isna(dataset.loc["other", "duplicate_of"])
-    assert dataset.loc["tass", "url"] == "https://tass.ru/1"
