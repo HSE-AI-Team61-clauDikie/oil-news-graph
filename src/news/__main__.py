@@ -44,6 +44,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="повторить статьи без текста",
     )
+    texts.add_argument(
+        "--newest-first",
+        action="store_true",
+        help="идти от свежих статей к старым",
+    )
     commands.add_parser("assemble", help="собрать итоговый датасет")
     return parser.parse_args()
 
@@ -79,8 +84,10 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    # httpx пишет в INFO каждый запрос: на сотнях тысяч статей это шум
+    # httpx пишет в INFO каждый запрос, trafilatura - каждую страницу без
+    # статьи: на сотнях тысяч статей это шум, причина и так попадает в error
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("trafilatura").setLevel(logging.ERROR)
     args = parse_args()
     settings = NewsSettings()
     period = {
@@ -101,7 +108,11 @@ def main() -> None:
             mediacloud.find_collections(DirectoryApi(api_key(settings)), args.name),
         ),
         "fulltext": lambda: asyncio.run(
-            fulltext.run(settings, retry_failed=args.retry_failed),
+            fulltext.run(
+                settings,
+                retry_failed=args.retry_failed,
+                newest_first=args.newest_first,
+            ),
         ),
         "assemble": lambda: fulltext.assemble(settings),
     }

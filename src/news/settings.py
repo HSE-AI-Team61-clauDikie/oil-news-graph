@@ -35,7 +35,7 @@ class NewsSettings(BaseSettings):
 
     concurrency: int = Field(default=32, description="Одновременных загрузок")
     per_host_concurrency: int = Field(
-        default=2,
+        default=4,
         description="Одновременных загрузок с одного сайта",
     )
     request_timeout: float = 20.0
@@ -51,7 +51,15 @@ class NewsSettings(BaseSettings):
         default=4.0,
         description="Секунд между запросами к archive.org: чаще он отвечает 429",
     )
+    junk_repeats: int = Field(
+        default=3,
+        description="Столько одинаковых текстов с одного сайта - шаблон, не статья",
+    )
     batch_size: int = Field(default=500, description="Статей в одном part-файле")
+    wayback_batch_size: int = Field(
+        default=50,
+        description="Статей в part-файле этапа Wayback: он медленный, сохраняем чаще",
+    )
 
     index_dir: Path = Path("data/raw/news/mediacloud")
     stories_path: Path = Path("data/interim/news/stories.parquet")
