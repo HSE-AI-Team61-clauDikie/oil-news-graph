@@ -21,6 +21,7 @@ dependencies = [
     "trafilatura>=2.3.1",
     "tenacity>=9.2.1",
     "pydantic-settings>=2.16.2",
+    "truststore>=0.10.5",
 ]
 
 [dependency-groups]
@@ -33,6 +34,7 @@ eda = [
 notebooks = [
     "jupyterlab>=4.6.5",
     "ipykernel>=7.4.0",
+    "xlrd>=2.0.2",
 ]
 lint = [
     "ruff>=0.17.3",
