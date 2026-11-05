@@ -1,0 +1,1 @@
+Выгрузка новостей с MediaCloud: https://drive.google.com/file/d/1l5JiZjP3dSKSOOoVyuac278oMboAX4Go/view?usp=sharing
