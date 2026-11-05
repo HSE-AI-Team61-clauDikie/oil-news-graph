@@ -3,8 +3,10 @@ import hashlib
 import logging
 import re
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, date, datetime
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
@@ -41,7 +43,7 @@ class Article:
 
 class ArticleFetcher:
     """
-    Загрузка статей: живая страница, при неудаче - снимок Wayback Machine.
+    Загрузка статей с сайтов изданий и из Wayback Machine.
 
     Лимиты общие на весь прогон, поэтому экземпляр один на прогон.
     """
@@ -56,33 +58,6 @@ class ArticleFetcher:
         self.wayback_lock = asyncio.Lock()
         self.wayback_ready_at = 0.0
 
-    async def fetch_article(
-        self,
-        story_id: str,
-        url: str,
-        publish_date: date | None,
-    ) -> Article:
-        """
-        Загрузить статью и извлечь текст.
-
-        Parameters:
-            - story_id: id истории Media Cloud;
-            - url: адрес статьи;
-            - publish_date: дата публикации, по ней ищется ближайший снимок.
-
-        Returns:
-            Статья с текстом или с причиной, почему текста нет.
-        """
-
-        async with self.limit:
-            live = await self.fetch_live(story_id, url)
-            if live.text_source == "live":
-                return live
-            archived = await self.fetch_wayback(story_id, url, publish_date)
-        if archived.text_source == "wayback":
-            return archived
-        return replace(live, error=f"{live.error}; wayback: {archived.error}")
-
     async def fetch_live(self, story_id: str, url: str) -> Article:
         """
         Загрузить статью с сайта издания.
@@ -96,7 +71,9 @@ class ArticleFetcher:
         """
 
         try:
-            async with self.host_limits[urlsplit(url).netloc]:
+            # Сначала слот сайта, потом общий: задача, ждущая занятый сайт,
+            # не должна держать общий слот и тормозить остальные сайты
+            async with self.host_limits[urlsplit(url).netloc], self.limit:
                 response = await self.client.get(url)
         except httpx.HTTPError as error:
             return Article(story_id, url, error=f"{type(error).__name__}: {error}")
@@ -155,6 +132,31 @@ class ArticleFetcher:
         article = Article(story_id, url, wayback_timestamp=timestamp)
         return await self.to_article(article, snapshot, "wayback")
 
+    async def fetch_archived(
+        self,
+        story_id: str,
+        url: str,
+        publish_date: date | None,
+        live_error: str,
+    ) -> Article:
+        """
+        Повторить статью, не давшую текста на сайте, через Wayback.
+
+        Parameters:
+            - story_id: id истории Media Cloud;
+            - url: адрес статьи;
+            - publish_date: дата публикации или None;
+            - live_error: почему не подошла живая страница.
+
+        Returns:
+            Статья из Wayback или запись с обеими причинами.
+        """
+
+        archived = await self.fetch_wayback(story_id, url, publish_date)
+        if archived.text_source == "wayback":
+            return archived
+        return Article(story_id, url, error=f"{live_error}; wayback: {archived.error}")
+
     @retry(
         retry=retry_if_exception_type(httpx.HTTPError),
         wait=wait_exponential(multiplier=15, max=300),
@@ -185,6 +187,9 @@ class ArticleFetcher:
             await asyncio.sleep(max(0.0, self.wayback_ready_at - loop.time()))
             self.wayback_ready_at = loop.time() + self.settings.wayback_interval
         response = await self.client.get(url, params=params)
+        if response.status_code == httpx.codes.TOO_MANY_REQUESTS:
+            # Пауза для всей очереди: иначе следующие запросы тоже получат 429
+            self.wayback_ready_at = loop.time() + 60
         if (
             response.status_code == httpx.codes.TOO_MANY_REQUESTS
             or response.is_server_error
@@ -261,30 +266,126 @@ def read_articles(settings: NewsSettings) -> pd.DataFrame:
     )
 
 
-async def run(settings: NewsSettings, *, retry_failed: bool = False) -> None:
+def junk_mask(articles: pd.DataFrame, repeats: int) -> pd.Series:
     """
-    Скачать тексты для индекса `stories_path` батчами в part-файлы.
+    Отметить тексты, которые не являются статьёй.
 
-    Истории, которые уже есть в part-файлах, пропускаются; с `retry_failed`
-    повторяются те из них, у которых текста нет.
+    Это редирект на главную сайта или один и тот же текст на `repeats` и больше
+    страницах одного сайта: подвал, лента анонсов, заглушка вместо статьи.
+
+    Parameters:
+        - articles: таблица из `read_articles`;
+        - repeats: сколько одинаковых текстов с сайта считать шаблоном.
+
+    Returns:
+        Булева маска по строкам `articles`.
+    """
+
+    with_text = articles[articles["text"].notna() & (articles["text_source"] != "none")]
+    hosts = with_text["url"].map(
+        lambda url: urlsplit(url).netloc.lower().removeprefix("www."),
+    )
+    repeated = with_text.groupby([hosts, with_text["text"].map(text_fingerprint)])[
+        "story_id"
+    ].transform("size")
+    to_homepage = [
+        urlsplit(final).path in {"", "/"} and urlsplit(url).path not in {"", "/"}
+        for url, final in zip(
+            with_text["url"],
+            with_text["final_url"].fillna("/x"),
+            strict=True,
+        )
+    ]
+    junk = (repeated >= repeats) | pd.Series(to_homepage, index=with_text.index)
+    # astype: на пустой таблице маска получается object, и ~ ломает её
+    return junk.reindex(articles.index, fill_value=False).astype(bool)
+
+
+def needs_wayback(articles: pd.DataFrame, settings: NewsSettings) -> pd.DataFrame:
+    """
+    Статьи, которые стоит поискать в Wayback.
+
+    Это статьи без текста и с текстом-шаблоном; уже искавшиеся в Wayback
+    не повторяются.
+
+    Parameters:
+        - articles: таблица из `read_articles`;
+        - settings: порог шаблона.
+
+    Returns:
+        Строки `articles`; у шаблонов в `error` - «не статья».
+    """
+
+    junk = junk_mask(articles, settings.junk_repeats)
+    tried = (articles["text_source"] == "wayback") | articles["error"].fillna(
+        "",
+    ).str.contains("wayback:", regex=False)
+    todo = articles[~tried & ((articles["text_source"] == "none") | junk)].copy()
+    todo["error"] = todo["error"].where(todo["text_source"] == "none", "не статья")
+    return todo
+
+
+async def fetch_in_parts(
+    settings: NewsSettings,
+    todo: pd.DataFrame,
+    fetch: Callable[[Any], Awaitable[Article]],
+    part_size: int,
+) -> None:
+    """
+    Обработать строки пачками и сохранить каждую пачку в свой part-файл.
+
+    Parameters:
+        - settings: каталог part-файлов;
+        - todo: строки к загрузке;
+        - fetch: загрузка одной строки из `todo.itertuples()`;
+        - part_size: строк в пачке.
+    """
+
+    settings.fulltext_dir.mkdir(parents=True, exist_ok=True)
+    part = len(list(settings.fulltext_dir.glob("part-*.parquet")))
+    for start in range(0, len(todo), part_size):
+        batch = todo.iloc[start : start + part_size]
+        async with asyncio.TaskGroup() as group:
+            tasks = [group.create_task(fetch(row)) for row in batch.itertuples()]
+        articles = pd.DataFrame([asdict(task.result()) for task in tasks])
+        path = settings.fulltext_dir / f"part-{part:05d}.parquet"
+        tmp = path.with_suffix(".tmp")
+        articles.to_parquet(tmp, index=False)
+        tmp.replace(path)
+        part += 1
+        sources = articles["text_source"].value_counts().to_dict()
+        left = len(todo) - start - len(batch)
+        logger.info(f"{path.name}: {sources}, осталось {left}")
+
+
+async def run(
+    settings: NewsSettings,
+    *,
+    retry_failed: bool = False,
+    newest_first: bool = False,
+) -> None:
+    """
+    Скачать тексты для индекса `stories_path` в part-файлы.
+
+    Сначала живые страницы всех статей, потом Wayback для тех, что не дали
+    текста: медленный archive.org не задерживает живые страницы. Скачанное
+    раньше пропускается; с `retry_failed` статьи без текста идут заново.
 
     Parameters:
         - settings: пути, лимиты и таймауты;
-        - retry_failed: повторить истории без текста.
+        - retry_failed: повторить статьи без текста;
+        - newest_first: идти от свежих статей к старым.
     """
 
     stories = pd.read_parquet(
         settings.stories_path,
         columns=["story_id", "url", "publish_date"],
-    )
+    ).sort_values("publish_date", ascending=not newest_first, kind="stable")
     fetched = read_articles(settings)
     if retry_failed:
         fetched = fetched[fetched["text_source"] != "none"]
-    todo = stories[~stories["story_id"].isin(fetched["story_id"])]
-    logger.info(f"К загрузке {len(todo)} из {len(stories)} историй")
+    live_todo = stories[~stories["story_id"].isin(fetched["story_id"])]
 
-    settings.fulltext_dir.mkdir(parents=True, exist_ok=True)
-    part = len(list(settings.fulltext_dir.glob("part-*.parquet")))
     async with httpx.AsyncClient(
         headers={
             "User-Agent": settings.user_agent,
@@ -295,24 +396,36 @@ async def run(settings: NewsSettings, *, retry_failed: bool = False) -> None:
         limits=httpx.Limits(max_connections=settings.concurrency),
     ) as client:
         fetcher = ArticleFetcher(client, settings)
-        for start in range(0, len(todo), settings.batch_size):
-            batch = todo.iloc[start : start + settings.batch_size]
-            tasks: list[asyncio.Task[Article]] = []
-            async with asyncio.TaskGroup() as group:
-                for row in batch.itertuples():
-                    day = (
-                        row.publish_date.date() if pd.notna(row.publish_date) else None
-                    )
-                    article = fetcher.fetch_article(row.story_id, row.url, day)
-                    tasks.append(group.create_task(article))
-            articles = pd.DataFrame([asdict(task.result()) for task in tasks])
-            path = settings.fulltext_dir / f"part-{part:05d}.parquet"
-            tmp = path.with_suffix(".tmp")
-            articles.to_parquet(tmp, index=False)
-            tmp.replace(path)
-            part += 1
-            sources = articles["text_source"].value_counts().to_dict()
-            logger.info(f"{path.name}: {sources}")
+
+        logger.info(f"Живые страницы: {len(live_todo)} из {len(stories)} историй")
+        await fetch_in_parts(
+            settings,
+            live_todo,
+            lambda row: fetcher.fetch_live(row.story_id, row.url),
+            settings.batch_size,
+        )
+
+        # Порядок задаёт stories: merge сохраняет порядок левой таблицы
+        wayback_todo = stories[["story_id", "publish_date"]].merge(
+            needs_wayback(read_articles(settings), settings),
+            on="story_id",
+        )
+        wayback_todo["publish_day"] = [
+            day.date() if pd.notna(day) else None
+            for day in wayback_todo["publish_date"]
+        ]
+        logger.info(f"Wayback: {len(wayback_todo)} историй")
+        await fetch_in_parts(
+            settings,
+            wayback_todo,
+            lambda row: fetcher.fetch_archived(
+                row.story_id,
+                row.url,
+                row.publish_day,
+                row.error,
+            ),
+            settings.wayback_batch_size,
+        )
 
 
 def text_fingerprint(text: str) -> str:
@@ -328,37 +441,3 @@ def text_fingerprint(text: str) -> str:
 
     normalized = re.sub(r"\W+", " ", text.lower()).strip()
     return hashlib.sha1(normalized.encode(), usedforsecurity=False).hexdigest()
-
-
-def assemble(settings: NewsSettings) -> pd.DataFrame:
-    """
-    Собрать датасет: индекс Media Cloud и тексты статей.
-
-    Перепечатки одного текста остаются в датасете, у всех, кроме самой ранней,
-    заполнено `duplicate_of`.
-
-    Parameters:
-        - settings: пути индекса, part-файлов и результата.
-
-    Returns:
-        Статьи с текстом.
-    """
-
-    stories = pd.read_parquet(settings.stories_path)
-    articles = read_articles(settings)
-    articles = articles[articles["text_source"] != "none"].drop(columns="url")
-    dataset = (
-        stories.merge(articles, on="story_id", how="inner", validate="one_to_one")
-        .sort_values(["publish_date", "story_id"], kind="stable")
-        .reset_index(drop=True)
-    )
-    dataset["text_hash"] = dataset["text"].map(text_fingerprint)
-    first = dataset.groupby("text_hash")["story_id"].transform("first")
-    dataset["duplicate_of"] = first.where(first != dataset["story_id"])
-    settings.dataset_path.parent.mkdir(parents=True, exist_ok=True)
-    dataset.to_parquet(settings.dataset_path, index=False)
-    logger.info(
-        f"{settings.dataset_path}: {len(dataset)} статей, "
-        f"перепечаток {dataset['duplicate_of'].notna().sum()}",
-    )
-    return dataset
