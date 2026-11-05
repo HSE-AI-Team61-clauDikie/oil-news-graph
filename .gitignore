@@ -17,9 +17,7 @@ __pycache__/
 .DS_Store
 
 # Data
-data/raw/*
-data/interim/*
-data/processed/*
+*.parquet
 
 !data/raw/.gitkeep
 !data/interim/.gitkeep
