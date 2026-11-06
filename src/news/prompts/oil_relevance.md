@@ -75,7 +75,8 @@ comments, no extra keys. Keys in this order:
   - `deals_corporate` — M&A, contracts, earnings, management, investments,
     lawsuits, listings of oil and gas companies;
   - `macro` — budgets, currencies, inflation, growth, trade via oil and gas.
-- `entities` — up to 8 oil and gas entities named in the item: companies,
+- `entities` — up to 8 oil and gas entities explicitly named in the title or
+  lead (never inferred: "Venezuela raises output" does not name PDVSA): companies,
   fields and basins, refineries, pipelines, terminals, chokepoints,
   benchmarks and grades, institutions and regulators (OPEC+, EIA, OFAC…).
   Write each in its canonical English form as used in the reference ("Saudi
