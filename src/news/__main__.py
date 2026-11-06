@@ -7,6 +7,7 @@ import pandas as pd
 from mediacloud.api import DirectoryApi, SearchApi
 
 from news import dataset, fulltext, mediacloud
+from news.regions import load_regions
 from news.settings import NewsSettings
 
 logger = logging.getLogger("news")
@@ -26,7 +27,11 @@ def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(
         prog="python -m news",
-        description="Русскоязычные новости о нефти: Media Cloud и полный текст",
+        description="Новости о нефти: Media Cloud и полный текст",
+    )
+    parser.add_argument(
+        "--region",
+        help="регион из regions.toml; без него - российские новости",
     )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser(
@@ -90,6 +95,12 @@ def main() -> None:
     logging.getLogger("trafilatura").setLevel(logging.ERROR)
     args = parse_args()
     settings = NewsSettings()
+    if args.region:
+        regions = load_regions()
+        if args.region not in regions:
+            msg = f"Нет региона {args.region}, есть: {', '.join(regions)}"
+            raise SystemExit(msg)
+        settings = regions[args.region].settings(settings)
     period = {
         "start_date": getattr(args, "start", None),
         "end_date": getattr(args, "end", None),

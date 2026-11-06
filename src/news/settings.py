@@ -41,6 +41,7 @@ class NewsSettings(BaseSettings):
         description="Одновременных загрузок с одного сайта",
     )
     request_timeout: float = 20.0
+    accept_language: str = "ru,en;q=0.8"
     user_agent: str = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/130.0 Safari/537.36"
@@ -63,7 +64,11 @@ class NewsSettings(BaseSettings):
         description="Статей в part-файле этапа Wayback: он медленный, сохраняем чаще",
     )
 
-    title_exclude: str = Field(
+    use_wayback: bool = Field(
+        default=True,
+        description="Искать в Wayback статьи, не давшие текста на сайте",
+    )
+    title_exclude: str | None = Field(
         default=r"нефтехимик|нефтчи|опек(?!\b|\+)",
         description="Регулярка заголовков-шума: спортклубы, опека и опекуны",
     )

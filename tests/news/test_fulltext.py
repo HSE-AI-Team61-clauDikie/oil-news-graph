@@ -230,6 +230,31 @@ async def test_run_goes_to_wayback_after_live(
     assert len(list(settings.fulltext_dir.glob("part-*.parquet"))) == 2
 
 
+async def test_run_without_wayback_stops_after_live(
+    settings: NewsSettings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pd.DataFrame(
+        {
+            "story_id": ["dead"],
+            "url": ["https://kp.ru/1"],
+            "publish_date": pd.to_datetime(["2019-01-15"]),
+        },
+    ).to_parquet(settings.stories_path)
+    hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host)
+        return httpx.Response(404)
+
+    patch_client(monkeypatch, handler)
+
+    await run(settings.model_copy(update={"use_wayback": False}))
+
+    assert hosts == ["kp.ru"]
+    assert read_articles(settings).iloc[0]["error"] == "HTTP 404"
+
+
 async def test_run_skips_fetched_and_retries_failed(
     settings: NewsSettings,
     monkeypatch: pytest.MonkeyPatch,
