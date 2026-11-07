@@ -7,38 +7,45 @@ from news.regions import Region, load_regions
 from news.settings import NewsSettings
 
 
-def test_query_without_terms_takes_whole_stream() -> None:
-    region = Region(
-        name="saudi",
-        countries=["Saudi Arabia"],
-        collection_ids=[34412050],
-        languages=["ar", "en"],
-    )
+def make_region(*, full_stream: bool = False) -> Region:
+    """
+    Регион США с двумя терминами.
 
-    assert region.query() == "language:(ar OR en)"
+    Parameters:
+        - full_stream: качать ли поток целиком.
 
+    Returns:
+        Регион для тестов.
+    """
 
-def test_query_with_terms_filters_by_them() -> None:
-    region = Region(
+    return Region(
         name="us",
-        countries=["United States"],
+        countries=["US"],
         collection_ids=[34412234],
-        languages=["en"],
-        terms=["oil", "crude", '"natural gas"'],
+        languages=["en", "es"],
+        terms=["oil", '"natural gas"'],
+        full_stream=full_stream,
     )
 
-    assert region.query() == 'language:(en) AND (oil OR crude OR "natural gas")'
+
+def test_recall_and_background_split_by_title_terms() -> None:
+    region = make_region()
+
+    assert region.recall_query() == (
+        'language:(en OR es) AND article_title:(oil OR "natural gas")'
+    )
+    assert region.background_query() == (
+        'language:(en OR es) AND NOT article_title:(oil OR "natural gas")'
+    )
+
+
+def test_query_is_recall_unless_full_stream() -> None:
+    assert make_region().query() == make_region().recall_query()
+    assert make_region(full_stream=True).query() == "language:(en OR es)"
 
 
 def test_settings_use_region_paths_and_skip_wayback() -> None:
-    region = Region(
-        name="us",
-        countries=["United States"],
-        collection_ids=[34412234],
-        languages=["en", "es"],
-    )
-
-    settings = region.settings(NewsSettings(_env_file=None))
+    settings = make_region(full_stream=True).settings(NewsSettings(_env_file=None))
 
     assert settings.collection_ids == [34412234]
     assert settings.query == "language:(en OR es)"
@@ -49,23 +56,43 @@ def test_settings_use_region_paths_and_skip_wayback() -> None:
     assert settings.dataset_path == Path("data/processed/news/us/oil_news.parquet")
 
 
-def test_region_needs_collections() -> None:
+def test_region_needs_collections_and_terms() -> None:
     with pytest.raises(ValidationError):
-        Region(name="x", countries=["X"], collection_ids=[], languages=["en"])
+        Region(
+            name="x",
+            countries=["X"],
+            collection_ids=[],
+            languages=["en"],
+            terms=["oil"],
+        )
+    with pytest.raises(ValidationError):
+        Region(name="x", countries=["X"], collection_ids=[1], languages=["en"])
 
 
-def test_load_regions_reads_toml(tmp_path: Path) -> None:
+def test_load_regions_joins_common_language_and_extra_terms(tmp_path: Path) -> None:
     path = tmp_path / "regions.toml"
     path.write_text(
-        "[mexico]\n"
-        'countries = ["Mexico"]\n'
+        "[terms]\n"
+        'common = ["OPEC", "Brent"]\n'
+        'es = ["petróleo", "OPEC"]\n'
+        'en = ["oil"]\n'
+        "[regions.mx]\n"
+        'countries = ["MX"]\n'
         "collection_ids = [34412427]\n"
         'languages = ["es"]\n'
-        'terms = ["petróleo", "Pemex"]\n',
+        'extra_terms = ["Pemex"]\n',
         encoding="utf-8",
     )
 
     regions = load_regions(path)
 
-    assert list(regions) == ["mexico"]
-    assert regions["mexico"].query() == "language:(es) AND (petróleo OR Pemex)"
+    assert list(regions) == ["mx"]
+    assert regions["mx"].terms == ["OPEC", "Brent", "petróleo", "Pemex"]
+    assert regions["mx"].full_stream is False
+
+
+def test_repository_regions_load() -> None:
+    regions = load_regions()
+
+    assert regions
+    assert all(region.terms for region in regions.values())

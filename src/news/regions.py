@@ -10,28 +10,59 @@ class Region(BaseModel):
     """
     Регион сбора: страны, коллекции Media Cloud и запрос к ним.
 
-    Пустой `terms` - качается весь поток коллекций на языках `languages`;
-    иначе только истории, где встречается хотя бы один термин.
+    `terms` - recall-запрос по заголовку: с `full_stream` индекс качается
+    целиком, но выборка для разметки всё равно делится по нему на кандидатов
+    и фон.
     """
 
     name: str
     countries: list[str] = Field(min_length=1)
     collection_ids: list[int] = Field(min_length=1)
     languages: list[str] = Field(min_length=1)
-    terms: list[str] = Field(default_factory=list)
+    terms: list[str] = Field(min_length=1)
+    full_stream: bool = False
+
+    def language_filter(self) -> str:
+        """
+        Фильтр Media Cloud по языкам региона.
+
+        Returns:
+            Lucene-условие на поле `language`.
+        """
+
+        return f"language:({' OR '.join(self.languages)})"
+
+    def recall_query(self) -> str:
+        """
+        Истории на языках региона, в заголовке которых есть хотя бы один термин.
+
+        Returns:
+            Lucene-запрос кандидатов.
+        """
+
+        terms = " OR ".join(self.terms)
+        return f"{self.language_filter()} AND article_title:({terms})"
+
+    def background_query(self) -> str:
+        """
+        Истории на языках региона, которые recall-запрос не находит.
+
+        Returns:
+            Lucene-запрос дополнения к кандидатам.
+        """
+
+        terms = " OR ".join(self.terms)
+        return f"{self.language_filter()} AND NOT article_title:({terms})"
 
     def query(self) -> str:
         """
-        Lucene-запрос Media Cloud для региона.
+        Запрос выкачки индекса.
 
         Returns:
-            Фильтр по языкам и, если заданы, по терминам.
+            Весь поток на языках региона при `full_stream`, иначе кандидаты.
         """
 
-        query = f"language:({' OR '.join(self.languages)})"
-        if self.terms:
-            query += f" AND ({' OR '.join(self.terms)})"
-        return query
+        return self.language_filter() if self.full_stream else self.recall_query()
 
     def settings(self, base: NewsSettings) -> NewsSettings:
         """
@@ -68,13 +99,25 @@ def load_regions(path: Path | None = None) -> dict[str, Region]:
     """
     Прочитать описание регионов.
 
+    Термины региона - это `terms.common`, термины его языков из `terms` и
+    `extra_terms` самого региона, без повторов.
+
     Parameters:
-        - path: TOML, одна таблица на регион; по умолчанию `regions.toml` рядом.
+        - path: TOML с таблицами `terms` и `regions`; по умолчанию
+            `regions.toml` рядом.
 
     Returns:
         Регионы по имени.
     """
 
     path = path or Path(__file__).with_name("regions.toml")
-    tables = tomllib.loads(path.read_text(encoding="utf-8"))
-    return {name: Region(name=name, **fields) for name, fields in tables.items()}
+    config = tomllib.loads(path.read_text(encoding="utf-8"))
+    vocabulary: dict[str, list[str]] = config["terms"]
+    regions: dict[str, Region] = {}
+    for name, fields in config["regions"].items():
+        terms = vocabulary.get("common", []).copy()
+        for language in fields["languages"]:
+            terms += vocabulary.get(language, [])
+        terms += fields.pop("extra_terms", [])
+        regions[name] = Region(name=name, terms=list(dict.fromkeys(terms)), **fields)
+    return regions

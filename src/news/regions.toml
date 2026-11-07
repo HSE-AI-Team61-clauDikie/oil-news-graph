@@ -1,0 +1,498 @@
+# Регионы сбора нефтяных новостей.
+#
+# [terms] - recall-термины заголовка по языкам Media Cloud: цель - ничего не
+# потерять, точность обеспечивает классификатор. Термины региона - common,
+# термины его языков и extra_terms. Термины с * пишутся строчными: шаблоны
+# Lucene не проходят анализатор.
+#
+# [regions.<код>] - страна: коллекции Media Cloud (National и State & Local),
+# основные языки потока и full_stream - качать ли поток целиком (он
+# укладывается в квоту) или только кандидатов recall-запроса.
+
+[terms]
+common = [
+    "OPEC", "OPEP", "Brent", "WTI", "LNG", "LPG", "Urals", "ESPO",
+    "Aramco", "ADNOC", "QatarEnergy", "KPC", "SOMO", "NIOC", "Pemex", "PDVSA",
+    "Citgo", "SOCAR", "KazMunayGas", "Tengizchevroil", "Tengiz", "Kashagan",
+    "Karachaganak", "Sinopec", "PetroChina", "CNPC", "CNOOC", "ONGC", "BPCL",
+    "HPCL", "Rosneft", "Lukoil", "Gazprom", "Transneft", "Novatek", "Exxon",
+    "ExxonMobil", "Chevron", "ConocoPhillips", "TotalEnergies", "Shell", "BP",
+    "Eni", "Equinor", "Repsol", "OMV", "Orlen", "Petrobras", "Halliburton",
+    "Total", "IEA", "GECF",
+    "Schlumberger", "SLB", "Vitol", "Trafigura", "Gunvor", "Cheniere",
+    "Hormuz", "Druzhba", '"Nord Stream"', "TurkStream", "TTF", '"Henry Hub"',
+    "Cushing", "Permian", "Bakken", "Ghawar", "Orinoco", "Cantarell",
+    "Leviathan", "Zohr", "Tamar", "Karish", "Murban",
+]
+en = [
+    "oil", "oilfield*", "crude", "petroleum", "petrol", "gasoline", "diesel",
+    "fuel", "fuels", "refiner*", "pipeline*", "barrel*", "bpd", "gas", "lng",
+    '"natural gas"', "shale", "fracking", "drilling", "driller*", "rig",
+    "rigs", "tanker*", "kerosene", '"jet fuel"', "petrochemical*",
+    "stockpile*", "inventories", "SPR", "opec+",
+]
+es = [
+    "petróleo", "petroleo", "petroler*", "crudo", "gasolina*", "gasolinera*",
+    "diésel", "diesel", "combustible*", "refiner*", "refinación",
+    "oleoducto*", "gasoducto*", "ducto*", "barril*", "gas", '"gas natural"',
+    "gnl", "glp", "huachicol*", "yacimiento*", "perforación", "pozos",
+    "turbosina", "combustóleo",
+]
+pt = [
+    "petróleo", "petroleo", "petrolífer*", "combustíve*", "combustivel",
+    "gasolina", "gasóleo", "diesel", "refinaria*", "oleoduto*", "gasoduto*",
+    "barril", "barris", "gás", "gnl", "gpl", "Galp",
+]
+fr = [
+    "pétrole*", "petrole*", "pétroli*", "brut", "carburant*", "essence",
+    "gazole", "gasoil", "fioul", "kérosène", "raffinerie*", "oléoduc*",
+    "gazoduc*", "baril*", "gaz", "gnl", "gpl", "Opep",
+]
+de = [
+    "öl*", "erdöl*", "rohöl*", "benzin*", "diesel*", "sprit*", "kraftstoff*", "treibstoff*",
+    "heizöl*", "raffinerie*", "pipeline*", "barrel", "erdgas*", "gas",
+    "gaspreis*", "gasspeicher*", "gaslieferung*", "flüssiggas*", "tankstelle*",
+    "tankrabatt", "Opec",
+]
+it = [
+    "petroli*", "greggio", "benzina", "gasolio", "carburant*", "accise",
+    "raffineri*", "oleodott*", "gasdott*", "barile", "barili", "gas",
+    "metano", "gnl", "gpl", "rigassificator*",
+]
+nl = [
+    "olie*", "aardolie", "benzine*", "diesel", "brandstof*",
+    "raffinaderij*", "pijpleiding*", "vaten", "aardgas*", "gas", "gasprijs*",
+    "lng", "tankstation*",
+]
+pl = [
+    "ropa", "ropy", "ropę", "ropie", "naftow*", "paliw*", "benzyn*",
+    "olej", "rafineri*", "rurociąg*", "ropociąg*", "gazociąg*", "baryłk*",
+    "gaz", "gazu", "gazem", "gazow*", "lng", "Naftoport", "PERN",
+]
+cs = [
+    "ropa", "ropy", "ropu", "ropovod*", "nafta", "nafty", "naftu", "naftou",
+    "benzín*", "pohonn*", "paliv*", "rafineri*", "plyn", "plynu", "plynovod*", "barel*",
+    "Unipetrol",
+]
+sk = [
+    "ropa", "ropy", "ropu", "ropovod*", "nafta", "nafty", "naftu", "naftou",
+    "benzín*", "palív*",
+    "pohonn*", "rafinéri*", "plyn", "plynu", "plynovod*", "Slovnaft",
+]
+hu = [
+    "olaj*", "kőolaj*", "nyersolaj*", "benzin*", "gázolaj*", "üzemanyag*",
+    "finomító*", "hordó*", "földgáz*", "gáz", "gázár*", "MOL", "árstop",
+]
+ro = [
+    "petrol", "petrolul", "petrolier*", "țiței", "titei", "benzin*",
+    "motorin*", "carburant*", "rafinări*", "rafinari*", "gaze", "gazelor",
+    "Petrom", "Romgaz", "Rompetrol", "Transgaz",
+]
+bg = [
+    "петрол*", "нефт*", "бензин*", "дизел*", "гориво*", "горива",
+    "рафинери*", "газ", "газа", "газът", "газопровод*", "нефтопровод*",
+    "Лукойл", "Булгаргаз",
+]
+el = [
+    "πετρέλαι*", "βενζίνη*", "καύσιμ*", "διυλιστήρι*", "αγωγ*",
+    '"φυσικό αέριο"', '"φυσικού αερίου"', "υγραέριο", "Helleniq", '"Motor Oil"',
+]
+hr = [
+    "naft*", "benzin*", "dizel*", "gorivo", "goriva", "gorivu", "rafinerij*",
+    "naftovod*", "plin", "plina", "plinovod*", "INA", "JANAF",
+]
+sl = [
+    "naft*", "bencin*", "dizel*", "gorivo", "goriva", "goriv", "rafinerij*",
+    "plin", "plina", "plinovod*", "Petrol",
+]
+sv = [
+    "olja", "oljan", "oljepris*", "råolj*", "bensin*", "diesel*", "drivmedel*",
+    "raffinaderi*", "naturgas*", "gas", "gaspris*", "Preem",
+]
+da = [
+    "olie", "olien", "oliepris*", "råolie*", "benzin*", "diesel*",
+    "brændstof*", "raffinaderi*", "naturgas*", "gas", "gaspris*",
+]
+fi = [
+    "öljy*", "raakaöljy*", "bensiini*", "diesel*", "polttoaine*",
+    "jalostamo*", "maakaasu*", "kaasu", "kaasun", "kaasua", "Neste",
+]
+et = [
+    "nafta*", "toornafta*", "kütus*", "bensiin*", "diisel*", "maagaas*",
+    "gaas", "gaasi", "põlevkiviõli*",
+]
+lv = [
+    "naft*", "degviel*", "benzīn*", "dīzeļdegviel*", "dabasgāz*", "gāze",
+    "gāzes",
+]
+lt = [
+    "naft*", "degal*", "benzin*", "dyzelin*", "dujų", "dujos", "dujotiek*",
+    "naftotiek*", "Būtingė",
+]
+mt = ["żejt", "petrol", "fjuwil", "gass", "diżil"]
+tr = [
+    "petrol", "petrolü", "petrole", "petrolün", "akaryakıt*", "benzin*",
+    "motorin*", "mazot", "rafineri*", '"boru hattı"', "doğalgaz*",
+    '"doğal gaz"', "varil*", "otogaz", "BOTAŞ", "TPAO", "Tüpraş", "Opet",
+]
+ar = [
+    "نفط", "النفط", "نفطية", "النفطية", "نفطي", "النفطي", "بترول", "البترول",
+    "البترولية", "الخام", "برميل", "براميل", "مصفاة", "المصفاة", "مصافي",
+    "تكرير", "بنزين", "البنزين", "ديزل", "سولار", "السولار", "مازوت", "وقود",
+    "الوقود", "المحروقات", "محروقات", "غاز", "الغاز", "المسال", "أوبك", "اوبك",
+    "أرامكو", "ارامكو", "أدنوك", "ادنوك", "سومو", "ناقلة", "ناقلات",
+    "والنفط", "بالنفط", "للنفط", "والبترول", "والغاز", "بالغاز", "للغاز",
+    "حقل", "حقول", "صافر",
+]
+fa = [
+    "نفت", "نفتی", "پالایشگاه", "پالایش", "بنزین", "گازوئیل", "سوخت", "گاز",
+    "میعانات", "بشکه", "اوپک", "نفتکش", "پتروشیمی", "خارک", "عسلویه",
+]
+he = [
+    "נפט", "דלק", "הדלק", "בנזין", "סולר", "גז", "הגז", '"גז טבעי"', "אסדה",
+    "אסדת", '"בית זיקוק"', '"בתי זיקוק"', "לווייתן", "בזן",
+]
+ru = [
+    "нефт*", "НПЗ", "ОПЕК", "бензин*", "дизел*", "топлив*", "мазут*", "газ",
+    "газа", "газу", "газом", "газов*", "газопровод*", "СПГ", "баррел*",
+    "нефтепродукт*", "роснефт*", "лукойл*", "газпром*", "транснефт*", "АЗС",
+]
+uk = [
+    "нафт*", "бензин*", "дизел*", "пальн*", "газ", "газу", "газопровід*",
+    "Нафтогаз", "Укрнафта",
+]
+kk = [
+    "мұнай*", "газ", "газы", "бензин*", "жанармай*", "ЖЖМ", "ҚазМұнайГаз",
+    "КТК", "Теңіз", "Қашаған", "Қарашығанақ",
+]
+az = [
+    "neft*", "qaz", "qazı", "qazın", "benzin*", "yanacaq*", "SOCAR", "ARDNŞ",
+    '"Şahdəniz"', "BTC", "Azəri",
+]
+zh = [
+    '"石油"', '"原油"', '"油价"', '"成品油"', '"汽油"', '"柴油"', '"天然气"',
+    '"液化天然气"', '"炼油"', '"炼厂"', '"炼化"', '"油田"', '"气田"', '"油气"',
+    '"欧佩克"', '"中石油"', '"中石化"', '"中海油"', '"加油站"', '"燃料油"',
+    '"页岩"', '"管道"', '"油轮"', '"石化"',
+]
+hi = [
+    "तेल", "पेट्रोल", "डीजल", "ईंधन", "रिफाइनरी", "गैस", "एलपीजी", "एलएनजी",
+    "सीएनजी", "ओपेक", "कच्चा", "क्रूड", "पाइपलाइन", "बैरल", "सिलेंडर",
+]
+ur = ["تیل", "پیٹرول", "ڈیزل", "گیس", "ایندھن", "ریفائنری", "اوگرا"]
+bn = ["তেল", "জ্বালানি", "পেট্রোল", "ডিজেল", "গ্যাস", "এলপিজি"]
+ta = ["எண்ணெய்", "பெட்ரோல்", "டீசல்", "எரிவாயு", "எரிபொருள்"]
+te = ["చమురు", "పెట్రోల్", "డీజిల్", "గ్యాస్", "ఇంధనం"]
+mr = ["तेल", "पेट्रोल", "डिझेल", "इंधन", "गॅस"]
+gu = ["તેલ", "પેટ્રોલ", "ડીઝલ", "ગેસ", "ઇંધણ"]
+kn = ["ತೈಲ", "ಪೆಟ್ರೋಲ್", "ಡೀಸೆಲ್", "ಅನಿಲ", "ಇಂಧನ"]
+ml = ["എണ്ണ", "പെട്രോൾ", "ഡീസൽ", "ഇന്ധന", "ഇന്ധനവില", "ഇന്ധനവിലയിൽ"]
+pa = ["ਤੇਲ", "ਪੈਟਰੋਲ", "ਡੀਜ਼ਲ", "ਗੈਸ"]
+
+ca = [
+    "petroli", "gasolina", "benzina", "gasoil", "carburant*", "combustible*",
+    "refineria*", "gasoducte*", "oleoducte*", "barril*", "gas",
+]
+bs = [
+    "naft*", "benzin*", "dizel*", "gorivo", "goriva", "rafinerij*", "plin",
+    "plina", "gas", "plinovod*",
+]
+
+# United States - State & Local; United States - National. 2015–2026: 187.05 млн историй; en 95%, es 4%
+[regions.us]
+countries = ["US"]
+collection_ids = [38379429, 34412234]
+languages = ["en", "es"]
+
+# Saudi Arabia - National; Saudi Arabia - State & Local. 2015–2026: 2.53 млн историй; ar 79%, en 13%
+[regions.sa]
+countries = ["SA"]
+collection_ids = [34412050, 38380804]
+languages = ["ar", "en"]
+
+# United Arab Emirates - National; United Arab Emirates - State & Local. 2015–2026: 3.52 млн историй; ar 82%, en 18%
+[regions.ae]
+countries = ["AE"]
+collection_ids = [34412114, 38381108]
+languages = ["ar", "en"]
+
+# Iraq - National; Iraq - State & Local. 2015–2026: 0.75 млн историй; ar 93%, en 3%, fa 1%
+[regions.iq]
+countries = ["IQ"]
+collection_ids = [34412423, 38380060]
+languages = ["ar", "en", "fa"]
+full_stream = true
+
+# Iran, Islamic Republic of - National; Iran - State & Local. 2015–2026: 12.52 млн историй; fa 93%, en 4%, fr 2%
+[regions.ir]
+countries = ["IR"]
+collection_ids = [34412284, 38380055]
+languages = ["fa", "en", "fr"]
+
+# Kuwait - National. 2015–2026: 3.05 млн историй; ar 93%, en 7%
+[regions.kw]
+countries = ["KW"]
+collection_ids = [34412071]
+languages = ["ar", "en"]
+
+# Qatar - National; Qatar - State & Local. 2015–2026: 1.10 млн историй; ml 67%, en 19%, ar 13%
+[regions.qa]
+countries = ["QA"]
+collection_ids = [34412242, 38380692]
+languages = ["ar", "en", "ml"]
+
+# Oman - National. 2015–2026: 0.46 млн историй; ar 57%, en 42%
+[regions.om]
+countries = ["OM"]
+collection_ids = [34412083]
+languages = ["ar", "en"]
+full_stream = true
+
+# Bahrain - National. 2015–2026: 1.84 млн историй; ml 48%, ar 44%, en 6%
+[regions.bh]
+countries = ["BH"]
+collection_ids = [34412049]
+languages = ["ar", "en", "ml"]
+
+# Israel - National. 2015–2026: 3.99 млн историй; he 65%, en 30%, fr 2%, ru 2%
+[regions.il]
+countries = ["IL"]
+collection_ids = [34412391]
+languages = ["he", "en", "fr", "ru"]
+
+# Jordan - National; Jordan - State & Local. 2015–2026: 2.93 млн историй; ar 86%, en 10%
+[regions.jo]
+countries = ["JO"]
+collection_ids = [34412072, 38380252]
+languages = ["ar", "en"]
+
+# Lebanon - National. 2015–2026: 3.77 млн историй; ar 71%, en 22%, fr 3%
+[regions.lb]
+countries = ["LB"]
+collection_ids = [34412343]
+languages = ["ar", "en", "fr"]
+
+# Syrian Arab Republic - National; Syria - State & Local. 2015–2026: 0.47 млн историй; ar 81%, fr 8%, en 6%
+[regions.sy]
+countries = ["SY"]
+collection_ids = [34412453, 38380999]
+languages = ["ar", "fr", "en"]
+full_stream = true
+
+# Yemen - National; Yemen - State & Local. 2015–2026: 0.78 млн историй; ar 92%, en 2%
+[regions.ye]
+countries = ["YE"]
+collection_ids = [34412100, 38381672]
+languages = ["ar", "en"]
+full_stream = true
+
+# Egypt - National. 2015–2026: 9.19 млн историй; ar 97%, en 3%
+[regions.eg]
+countries = ["EG"]
+collection_ids = [34412471]
+languages = ["ar", "en"]
+
+# Turkey - National; Turkey - State & Local. 2015–2026: 19.04 млн историй; tr 96%, en 3%
+[regions.tr]
+countries = ["TR"]
+collection_ids = [34412131, 38381036]
+languages = ["tr", "en"]
+
+# Austria - National; Austria - State & Local. 2015–2026: 6.49 млн историй; de 99%
+[regions.at]
+countries = ["AT"]
+collection_ids = [34412245, 38378035]
+languages = ["de"]
+
+# Belgium - National; Belgium - State & Local. 2015–2026: 9.48 млн историй; fr 53%, nl 38%, en 8%, de 1%
+[regions.be]
+countries = ["BE"]
+collection_ids = [34412298, 38379181]
+languages = ["fr", "nl", "en", "de"]
+
+# Bulgaria - National; Bulgaria - State & Local. 2015–2026: 7.63 млн историй; bg 87%, en 2%
+[regions.bg]
+countries = ["BG"]
+collection_ids = [34412233, 38379319]
+languages = ["bg", "en"]
+
+# Croatia - National. 2015–2026: 6.73 млн историй; hr 98%, bs 2%
+[regions.hr]
+countries = ["HR"]
+collection_ids = [34412323]
+languages = ["hr", "bs"]
+
+# Cyprus - National. 2015–2026: 3.08 млн историй; el 41%, tr 29%, ru 19%, en 11%
+[regions.cy]
+countries = ["CY"]
+collection_ids = [34412239]
+languages = ["el", "tr", "ru", "en"]
+
+# Czechia - National. 2015–2026: 4.50 млн историй; cs 95%, en 2%
+[regions.cz]
+countries = ["CZ"]
+collection_ids = [34412292]
+languages = ["cs", "en"]
+
+# Denmark - National; Denmark- State & Local. 2015–2026: 5.45 млн историй; da 98%
+[regions.dk]
+countries = ["DK"]
+collection_ids = [34412412, 38379645]
+languages = ["da"]
+
+# Estonia - National; Estonia - State & Local. 2015–2026: 1.72 млн историй; et 73%, ru 21%, en 6%
+[regions.ee]
+countries = ["EE"]
+collection_ids = [34412338, 38379735]
+languages = ["et", "ru", "en"]
+
+# Finland - National; Finland - State & Local. 2015–2026: 6.37 млн историй; fi 89%, sv 10%
+[regions.fi]
+countries = ["FI"]
+collection_ids = [34412208, 38379781]
+languages = ["fi", "sv"]
+
+# France - National; France - State & Local. 2015–2026: 24.49 млн историй; fr 98%
+[regions.fr]
+countries = ["FR"]
+collection_ids = [34412146, 38379799]
+languages = ["fr"]
+
+# Germany - State & Local; Germany - National. 2015–2026: 57.63 млн историй; de 91%, ru 6%
+[regions.de]
+countries = ["DE"]
+collection_ids = [38379816, 34412409]
+languages = ["de", "ru"]
+
+# Greece - National; Greece - State & Local. 2015–2026: 11.42 млн историй; el 98%, en 2%
+[regions.gr]
+countries = ["GR"]
+collection_ids = [34412477, 38379845]
+languages = ["el", "en"]
+
+# Hungary - National; Hungary - State & Local. 2015–2026: 9.77 млн историй; hu 94%, en 1%
+[regions.hu]
+countries = ["HU"]
+collection_ids = [34412252, 38379904]
+languages = ["hu", "en"]
+
+# Ireland - National; Ireland - State & Local. 2015–2026: 3.06 млн историй; en 99%
+[regions.ie]
+countries = ["IE"]
+collection_ids = [34412271, 38380065]
+languages = ["en"]
+
+# Italy - National; Italy - State & Local. 2015–2026: 21.09 млн историй; it 95%, en 4%, de 1%
+[regions.it]
+countries = ["IT"]
+collection_ids = [34412372, 38380117]
+languages = ["it", "en", "de"]
+
+# Latvia - National; Latvia - State & Local. 2015–2026: 2.13 млн историй; lv 75%, ru 23%, en 1%
+[regions.lv]
+countries = ["LV"]
+collection_ids = [34412437, 38380266]
+languages = ["lv", "ru", "en"]
+
+# Lithuania - National. 2015–2026: 2.99 млн историй; lt 92%, ru 2%, en 1%
+[regions.lt]
+countries = ["LT"]
+collection_ids = [38379746]
+languages = ["lt", "ru", "en"]
+
+# Luxembourg - National; Luxembourg, Belgium - State & Local. 2015–2026: 1.79 млн историй; fr 72%, de 20%, en 3%, pt 3%, lb 2%
+[regions.lu]
+countries = ["LU"]
+collection_ids = [38380287, 38379192]
+languages = ["fr", "de", "en", "pt", "lb"]
+
+# Malta - National. 2015–2026: 0.56 млн историй; en 64%, mt 35%, it 2%
+[regions.mt]
+countries = ["MT"]
+collection_ids = [34412381]
+languages = ["en", "mt", "it"]
+full_stream = true
+
+# Netherlands - National; Netherlands - State & Local. 2015–2026: 13.11 млн историй; nl 99%
+[regions.nl]
+countries = ["NL"]
+collection_ids = [34412382, 38380454]
+languages = ["nl"]
+
+# Poland - National; Poland - State & Local. 2015–2026: 9.86 млн историй; pl 100%
+[regions.pl]
+countries = ["PL"]
+collection_ids = [34412416, 38380631]
+languages = ["pl"]
+
+# Portugal - National; Portugal - State & Local. 2015–2026: 7.89 млн историй; pt 99%
+[regions.pt]
+countries = ["PT"]
+collection_ids = [34412337, 38380661]
+languages = ["pt"]
+
+# Romania - National; Romania - State & Local. 2015–2026: 8.98 млн историй; ro 97%, hu 2%, en 1%
+[regions.ro]
+countries = ["RO"]
+collection_ids = [34412235, 38380695]
+languages = ["ro", "hu", "en"]
+
+# Slovakia - National; Slovakia - State & Local. 2015–2026: 3.90 млн историй; sk 91%, hu 5%, en 4%
+[regions.sk]
+countries = ["SK"]
+collection_ids = [34412152, 38380860]
+languages = ["sk", "hu", "en"]
+
+# Slovenia - National. 2015–2026: 2.61 млн историй; sl 99%
+[regions.si]
+countries = ["SI"]
+collection_ids = [34412061]
+languages = ["sl"]
+
+# Spain - National; Spain - State & Local. 2015–2026: 55.45 млн историй; es 93%, ca 5%, en 1%
+[regions.es]
+countries = ["ES"]
+collection_ids = [34412356, 38002034]
+languages = ["es", "ca", "en"]
+
+# Sweden - National; Sweden - State & Local. 2015–2026: 16.35 млн историй; sv 99%
+[regions.se]
+countries = ["SE"]
+collection_ids = [34412223, 38380910]
+languages = ["sv"]
+
+# Kazakhstan - National; Kazakhstan - State & Local. 2015–2026: 3.93 млн историй; ru 82%, kk 10%, en 4%
+[regions.kz]
+countries = ["KZ"]
+collection_ids = [34412415, 38380255]
+languages = ["ru", "kk", "en"]
+
+# Azerbaijan - State & Local; Azerbaijan - National. 2015–2026: 11.17 млн историй; az 65%, ru 26%, en 6%
+[regions.az]
+countries = ["AZ"]
+collection_ids = [205925810, 34412123]
+languages = ["az", "ru", "en"]
+
+# Venezuela, Bolivarian Republic of - National; Venezuela - State & Local. 2015–2026: 5.29 млн историй; es 97%
+[regions.ve]
+countries = ["VE"]
+collection_ids = [34412387, 38380333]
+languages = ["es"]
+
+# Mexico - National; Mexico - State & Local. 2015–2026: 31.21 млн историй; es 99%
+[regions.mx]
+countries = ["MX"]
+collection_ids = [34412427, 38380322]
+languages = ["es"]
+
+# China - National; China - State & Local. 2015–2026: 6.44 млн историй; zh 57%, en 14%, ru 4%
+[regions.cn]
+countries = ["CN"]
+collection_ids = [34412193, 38379438]
+languages = ["zh", "en", "ru"]
+
+# India - State & Local; India - National. 2015–2026: 71.31 млн историй; en 43%, hi 42%, ta 5%, ml 3%, mr 2%, gu 2%, kn 1%
+[regions.in]
+countries = ["IN"]
+collection_ids = [38379954, 34412118]
+languages = ["en", "hi", "ta", "ml", "mr", "gu", "kn"]

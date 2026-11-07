@@ -6,9 +6,9 @@ from datetime import date
 import pandas as pd
 from mediacloud.api import DirectoryApi, SearchApi
 
-from news import dataset, fulltext, mediacloud
-from news.regions import load_regions
-from news.settings import NewsSettings
+from news import dataset, fulltext, labeling, mediacloud, sampling
+from news.regions import Region, load_regions
+from news.settings import LabelingSettings, NewsSettings
 
 logger = logging.getLogger("news")
 
@@ -33,6 +33,11 @@ def parse_args() -> argparse.Namespace:
         "--region",
         help="регион из regions.toml; без него - российские новости",
     )
+    parser.add_argument(
+        "--sample",
+        action="store_true",
+        help="fulltext по выборке на разметку, а не по индексу",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser(
         "count",
@@ -55,6 +60,31 @@ def parse_args() -> argparse.Namespace:
         help="идти от свежих статей к старым",
     )
     commands.add_parser("assemble", help="собрать итоговый датасет")
+    commands.add_parser(
+        "sample",
+        parents=[period],
+        help="выборка регион × год на разметку; с --region - один регион",
+    )
+    commands.add_parser("gold", help="отобрать gold-набор из выборки")
+    label = commands.add_parser("label", help="разметить выборку через DeepSeek")
+    label.add_argument(
+        "--review",
+        action="store_true",
+        help="второе мнение: gold, неуверенные и контрольная доля",
+    )
+    for name, text in (
+        ("benchmark", "сравнить модели эмбеддингов на разметке"),
+        ("train", "обучить итоговый классификатор"),
+    ):
+        command = commands.add_parser(name, help=text)
+        command.add_argument(
+            "--field",
+            choices=["title", "title_lead"],
+            default="title",
+            help="вход: заголовок или заголовок + лид",
+        )
+        if name == "train":
+            command.add_argument("--embedder", required=True, help="модель эмбеддингов")
     return parser.parse_args()
 
 
@@ -82,6 +112,125 @@ def log_table(frame: pd.DataFrame) -> None:
     logger.info(f"\n{frame.to_string(index=False)}")
 
 
+def collect_sample(
+    settings: NewsSettings,
+    regions: dict[str, Region],
+    name: str | None,
+) -> None:
+    """
+    Собрать выборку на разметку и склеить её.
+
+    Parameters:
+        - settings: период, размеры выборки и каталог;
+        - regions: все регионы;
+        - name: только этот регион, если задан.
+    """
+
+    chosen = [regions[name]] if name else list(regions.values())
+    sampling.collect(SearchApi(api_key(settings)), chosen, settings)
+    sample = sampling.merge(settings)
+    log_table(
+        sample.groupby(["region", "stratum"])
+        .size()
+        .unstack(fill_value=0)
+        .reset_index(),
+    )
+
+
+def select_gold(settings: NewsSettings) -> None:
+    """
+    Отобрать gold-набор и сохранить рядом с выборкой.
+
+    Parameters:
+        - settings: каталог выборки и размер набора.
+    """
+
+    sample = pd.read_parquet(settings.sample_dir / "stories.parquet")
+    picked = sampling.gold(sample, settings.gold_size)
+    path = settings.sample_dir / "gold.parquet"
+    sampling.write_atomic(picked, path)
+    logger.info(f"{path}: {len(picked)} историй, языков {picked['language'].nunique()}")
+
+
+def label_sample(
+    settings: NewsSettings,
+    regions: dict[str, Region],
+    *,
+    review: bool,
+) -> None:
+    """
+    Разметить выборку основной моделью или дать второе мнение.
+
+    Parameters:
+        - settings: каталоги выборки, текстов и разметки;
+        - regions: страны источников;
+        - review: второе мнение вместо основной разметки.
+
+    Raises:
+        SystemExit: ключ DeepSeek не задан.
+    """
+
+    labeling_settings = LabelingSettings()
+    if not labeling_settings.deepseek_api_key.get_secret_value():
+        msg = "Нет DEEPSEEK_API_KEY в .env"
+        raise SystemExit(msg)
+    sample = pd.read_parquet(settings.sample_dir / "stories.parquet")
+    inputs = labeling.build_inputs(
+        sample,
+        regions,
+        sampling.sample_settings(settings),
+        labeling_settings,
+    )
+    model = labeling_settings.model
+    if review:
+        gold = pd.read_parquet(settings.sample_dir / "gold.parquet")
+        primary = labeling.read_labels(settings, labeling_settings.model)
+        ids = labeling.review_ids(sample, gold, primary, labeling_settings)
+        inputs = inputs[inputs["story_id"].isin(ids)]
+        model = labeling_settings.review_model
+    asyncio.run(labeling.run(inputs, settings, labeling_settings, model))
+
+
+def classifier_command(
+    settings: NewsSettings,
+    regions: dict[str, Region],
+    args: argparse.Namespace,
+) -> None:
+    """
+    Сравнить модели эмбеддингов или обучить итоговый классификатор.
+
+    Parameters:
+        - settings: каталоги выборки, текстов и разметки;
+        - regions: страны источников;
+        - args: команда, поле текста и модель эмбеддингов.
+    """
+
+    # torch и sentence-transformers - в группе ml: без неё сбор и разметка работают
+    from news import classifier
+    from news.settings import ClassifierSettings
+
+    labeling_settings = LabelingSettings()
+    sample = pd.read_parquet(settings.sample_dir / "stories.parquet")
+    inputs = labeling.build_inputs(
+        sample,
+        regions,
+        sampling.sample_settings(settings),
+        labeling_settings,
+    )
+    frame = classifier.training_frame(
+        inputs,
+        sample,
+        labeling.read_labels(settings, labeling_settings.model),
+        labeling.read_labels(settings, labeling_settings.review_model),
+    )
+    logger.info(f"Обучающих историй: {len(frame)}, нефтяных {frame['target'].sum()}")
+    classifier_settings = ClassifierSettings()
+    if args.command == "benchmark":
+        log_table(classifier.benchmark(frame, args.field, classifier_settings))
+    else:
+        classifier.fit(args.embedder, frame, args.field, classifier_settings)
+
+
 def main() -> None:
     """Выполнить команду CLI."""
 
@@ -95,11 +244,13 @@ def main() -> None:
     logging.getLogger("trafilatura").setLevel(logging.ERROR)
     args = parse_args()
     settings = NewsSettings()
-    if args.region:
-        regions = load_regions()
-        if args.region not in regions:
-            msg = f"Нет региона {args.region}, есть: {', '.join(regions)}"
-            raise SystemExit(msg)
+    regions = load_regions()
+    if args.region and args.region not in regions:
+        msg = f"Нет региона {args.region}, есть: {', '.join(regions)}"
+        raise SystemExit(msg)
+    if args.sample:
+        settings = sampling.sample_settings(settings)
+    elif args.region and args.command != "sample":
         settings = regions[args.region].settings(settings)
     period = {
         "start_date": getattr(args, "start", None),
@@ -126,6 +277,11 @@ def main() -> None:
             ),
         ),
         "assemble": lambda: dataset.assemble(settings),
+        "sample": lambda: collect_sample(settings, regions, args.region),
+        "gold": lambda: select_gold(settings),
+        "label": lambda: label_sample(settings, regions, review=args.review),
+        "benchmark": lambda: classifier_command(settings, regions, args),
+        "train": lambda: classifier_command(settings, regions, args),
     }
     commands[args.command]()
 
