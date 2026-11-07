@@ -2,11 +2,12 @@ import argparse
 import asyncio
 import logging
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 from mediacloud.api import DirectoryApi, SearchApi
 
-from news import dataset, fulltext, labeling, mediacloud, sampling
+from news import dataset, fulltext, labeling, mediacloud, progress, sampling
 from news.regions import Region, load_regions
 from news.settings import LabelingSettings, NewsSettings
 
@@ -76,6 +77,10 @@ def parse_args() -> argparse.Namespace:
         help="download: индекс и склейка; process: filter, fulltext, assemble",
     )
     run.add_argument("--only", help="регионы через запятую, например us,sa")
+    commands.add_parser(
+        "status",
+        help="таблица прогона по регионам: скачано, отфильтровано, собрано",
+    )
     commands.add_parser(
         "sample",
         parents=[period],
@@ -355,9 +360,16 @@ def run_regions(
 def main() -> None:
     """Выполнить команду CLI."""
 
+    # Копия лога в файл: прогон идёт сутками, терминал могут закрыть
+    log_path = Path("data/logs/news.log")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_path, encoding="utf-8"),
+        ],
     )
     # httpx пишет в INFO каждый запрос, trafilatura - каждую страницу без
     # статьи: на сотнях тысяч статей это шум, причина и так попадает в error
@@ -371,7 +383,7 @@ def main() -> None:
         raise SystemExit(msg)
     if args.sample:
         settings = sampling.sample_settings(settings)
-    elif args.region and args.command not in {"sample", "run"}:
+    elif args.region and args.command not in {"sample", "run", "status"}:
         settings = regions[args.region].settings(settings)
         if args.command in {"fulltext", "assemble"}:
             # В регионе тексты качаются только для прошедших фильтр заголовков
@@ -410,6 +422,7 @@ def main() -> None:
         "train": lambda: classifier_command(settings, regions, args),
         "filter": lambda: filter_region(settings, args.region),
         "run": lambda: run_regions(settings, regions, args),
+        "status": lambda: log_table(progress.status(settings, list(regions.values()))),
     }
     commands[args.command]()
 

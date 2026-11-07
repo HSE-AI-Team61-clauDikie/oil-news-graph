@@ -26,6 +26,7 @@ __pycache__/
 *.xls
 *.xlsx
 data/external/*
+data/logs/
 data/models/**
 !data/models/news/
 !data/models/news/title/

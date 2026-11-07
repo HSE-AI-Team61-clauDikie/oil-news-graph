@@ -163,6 +163,7 @@ uv run --group ml python -m news train --field title --embedder intfloat/multili
 
 Полный прогон всех регионов — `run --stage download` и `run --stage process`,
 инструкция с оценками времени — [`docs/run_regions.md`](../../docs/run_regions.md).
+Ход прогона по регионам — `status`, лог — `data/logs/news.log`.
 
 Прогон региона (`us` — имя из `regions.toml`); каждая команда пропускает
 сделанное, поэтому её можно прерывать и перезапускать:

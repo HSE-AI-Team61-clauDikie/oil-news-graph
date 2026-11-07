@@ -11,6 +11,7 @@ from mediacloud.api import DirectoryApi, SearchApi
 from mediacloud.error import APIResponseError
 from mediacloud.types import Story
 from tenacity import (
+    before_sleep_log,
     retry,
     retry_if_exception,
     stop_after_attempt,
@@ -40,6 +41,9 @@ retrying = retry(
     wait=wait_exponential(multiplier=2, max=120),
     stop=stop_after_attempt(6),
     reraise=True,
+    # Пауза перед повтором длится до двух минут: без строки в логе её не
+    # отличить от зависания
+    before_sleep=before_sleep_log(logger, logging.WARNING),
 )
 
 
@@ -85,6 +89,7 @@ def iter_stories(
 
     story_list = retrying(api.story_list)
     token: str | None = None
+    page = 0
     while True:
         stories, token = story_list(
             settings.query,
@@ -94,6 +99,9 @@ def iter_stories(
             pagination_token=token,
             page_size=settings.page_size,
         )
+        page += 1
+        if token is not None:
+            logger.info(f"{start:%Y-%m-%d} - {end:%Y-%m-%d}: страница {page}")
         yield from stories
         if token is None:
             return
@@ -239,7 +247,8 @@ def download(api: SearchApi, settings: NewsSettings) -> None:
         return
     monthly = count(api, settings)
     sizes = dict(zip(monthly["month"], monthly["stories"], strict=True))
-    for start, end in pack_months(todo, sizes, settings.page_size):
+    windows = pack_months(todo, sizes, settings.page_size)
+    for number, (start, end) in enumerate(windows, start=1):
         name = (
             f"{start:%Y-%m}"
             if start.month == end.month and start.year == end.year
@@ -251,7 +260,7 @@ def download(api: SearchApi, settings: NewsSettings) -> None:
         tmp = path.with_suffix(".tmp")
         frame.to_parquet(tmp, index=False)
         tmp.replace(path)
-        logger.info(f"{path.name}: {len(frame)} историй")
+        logger.info(f"{path.name}: {len(frame)} историй, окно {number}/{len(windows)}")
 
 
 def normalize_url(url: str) -> str:
