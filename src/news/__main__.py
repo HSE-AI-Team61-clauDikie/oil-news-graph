@@ -64,6 +64,18 @@ def parse_args() -> argparse.Namespace:
         "filter",
         help="оценить заголовки индекса региона классификатором (нужен --region)",
     )
+    run = commands.add_parser(
+        "run",
+        parents=[period],
+        help="прогнать регионы по порядку regions.toml",
+    )
+    run.add_argument(
+        "--stage",
+        choices=["download", "process"],
+        required=True,
+        help="download: индекс и склейка; process: filter, fulltext, assemble",
+    )
+    run.add_argument("--only", help="регионы через запятую, например us,sa")
     commands.add_parser(
         "sample",
         parents=[period],
@@ -258,6 +270,88 @@ def filter_region(settings: NewsSettings, region: str | None) -> None:
     filtering.candidates(settings)
 
 
+def download_regions(base: NewsSettings, regions: list[Region], period: dict) -> None:
+    """
+    Скачать и склеить индекс регионов по очереди.
+
+    Исчерпанная квота Media Cloud останавливает прогон; повторный запуск
+    продолжит с первого недокачанного месяца.
+
+    Parameters:
+        - base: общие настройки и ключ;
+        - regions: регионы по порядку;
+        - period: `start_date`, `end_date`, если заданы.
+    """
+
+    for region in regions:
+        settings = region.settings(base).model_copy(update=period)
+        logger.info(f"{region.name}: выкачка индекса")
+        mediacloud.download(SearchApi(api_key(settings)), settings)
+        mediacloud.merge(settings)
+
+
+def process_regions(base: NewsSettings, regions: list[Region], period: dict) -> None:
+    """
+    Отфильтровать склеенный индекс регионов, скачать тексты и собрать датасеты.
+
+    Регионы без склеенного индекса пропускаются: их ещё качает `download`.
+
+    Parameters:
+        - base: общие настройки и модель заголовков;
+        - regions: регионы по порядку;
+        - period: `start_date`, `end_date`, если заданы.
+    """
+
+    # torch и sentence-transformers - в группе ml: без неё сбор и разметка работают
+    from news import filtering
+    from news.classifier import OilClassifier
+
+    model = OilClassifier(base.title_model_dir)
+    for region in regions:
+        settings = region.settings(base).model_copy(update=period)
+        if not settings.stories_path.exists():
+            logger.info(f"{region.name}: индекс ещё не склеен, пропущен")
+            continue
+        logger.info(f"{region.name}: фильтр, тексты, датасет")
+        filtering.filter_index(settings, model)
+        filtering.candidates(settings)
+        kept = settings.model_copy(update={"stories_path": settings.candidates_path})
+        asyncio.run(fulltext.run(kept, newest_first=True))
+        dataset.assemble(kept)
+
+
+def run_regions(
+    base: NewsSettings,
+    regions: dict[str, Region],
+    args: argparse.Namespace,
+) -> None:
+    """
+    Прогнать регионы по порядку `regions.toml`: выкачку или обработку.
+
+    Parameters:
+        - base: общие настройки;
+        - regions: все регионы;
+        - args: стадия, список регионов и период.
+
+    Raises:
+        SystemExit: в `--only` неизвестный регион.
+    """
+
+    names = args.only.split(",") if args.only else list(regions)
+    unknown = [name for name in names if name not in regions]
+    if unknown:
+        msg = f"Нет регионов {', '.join(unknown)}, есть: {', '.join(regions)}"
+        raise SystemExit(msg)
+    chosen = [regions[name] for name in names]
+    period = {
+        name: value
+        for name, value in {"start_date": args.start, "end_date": args.end}.items()
+        if value
+    }
+    stage = download_regions if args.stage == "download" else process_regions
+    stage(base, chosen, period)
+
+
 def main() -> None:
     """Выполнить команду CLI."""
 
@@ -277,7 +371,7 @@ def main() -> None:
         raise SystemExit(msg)
     if args.sample:
         settings = sampling.sample_settings(settings)
-    elif args.region and args.command != "sample":
+    elif args.region and args.command not in {"sample", "run"}:
         settings = regions[args.region].settings(settings)
         if args.command in {"fulltext", "assemble"}:
             # В регионе тексты качаются только для прошедших фильтр заголовков
@@ -315,6 +409,7 @@ def main() -> None:
         "benchmark": lambda: classifier_command(settings, regions, args),
         "train": lambda: classifier_command(settings, regions, args),
         "filter": lambda: filter_region(settings, args.region),
+        "run": lambda: run_regions(settings, regions, args),
     }
     commands[args.command]()
 

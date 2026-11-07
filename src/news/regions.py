@@ -1,4 +1,5 @@
 import tomllib
+from datetime import date
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -72,12 +73,13 @@ class Region(BaseModel):
             - base: общие настройки: ключ, период, лимиты.
 
         Returns:
-            Копия `base` с запросом, коллекциями и путями региона, без Wayback
-            и без русского фильтра заголовков.
+            Копия `base` с запросом, коллекциями и путями региона, с начала
+            2015 года, без Wayback и без русского фильтра заголовков.
         """
 
         return base.model_copy(
             update={
+                "start_date": date(2015, 1, 1),
                 "query": self.query(),
                 "collection_ids": self.collection_ids,
                 "title_exclude": None,

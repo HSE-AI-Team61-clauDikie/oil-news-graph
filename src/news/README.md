@@ -161,6 +161,9 @@ uv run --group ml python -m news benchmark --field title
 uv run --group ml python -m news train --field title --embedder intfloat/multilingual-e5-base
 ```
 
+Полный прогон всех регионов — `run --stage download` и `run --stage process`,
+инструкция с оценками времени — [`docs/run_regions.md`](../../docs/run_regions.md).
+
 Прогон региона (`us` — имя из `regions.toml`); каждая команда пропускает
 сделанное, поэтому её можно прерывать и перезапускать:
 

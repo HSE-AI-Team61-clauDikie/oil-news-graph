@@ -1,3 +1,4 @@
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,8 @@ def test_settings_use_region_paths_and_skip_wayback() -> None:
     settings = make_region(full_stream=True).settings(NewsSettings(_env_file=None))
 
     assert settings.collection_ids == [34412234]
+    assert settings.start_date == date(2015, 1, 1)
+    assert settings.candidates_path == Path("data/interim/news/us/candidates.parquet")
     assert settings.query == "language:(en OR es)"
     assert settings.use_wayback is False
     assert settings.title_exclude is None
