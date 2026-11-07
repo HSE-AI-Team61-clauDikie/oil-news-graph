@@ -2,6 +2,7 @@ import logging
 import math
 from collections.abc import Iterator
 from datetime import date, timedelta
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import pandas as pd
@@ -159,12 +160,67 @@ def count(api: SearchApi, settings: NewsSettings) -> pd.DataFrame:
     return monthly
 
 
+def downloaded_months(index_dir: Path) -> set[str]:
+    """
+    Месяцы, уже скачанные в `index_dir`.
+
+    Parameters:
+        - index_dir: каталог файлов `stories_YYYY-MM[_YYYY-MM].parquet`.
+
+    Returns:
+        Месяцы `YYYY-MM`, покрытые файлами индекса.
+    """
+
+    months: set[str] = set()
+    for path in index_dir.glob("stories_*.parquet"):
+        bounds = path.stem.removeprefix("stories_").split("_")
+        first = date.fromisoformat(f"{bounds[0]}-01")
+        last = date.fromisoformat(f"{bounds[-1]}-01")
+        months |= {f"{start:%Y-%m}" for start, _ in month_windows(first, last)}
+    return months
+
+
+def pack_months(
+    windows: list[tuple[date, date]],
+    sizes: dict[str, int],
+    page_size: int,
+) -> list[tuple[date, date]]:
+    """
+    Склеить соседние месяцы в окна, пока окно умещается в одну страницу.
+
+    Media Cloud считает квоту запросами, а не историями: месяц с десятком
+    историй стоит столько же, сколько месяц с тысячей.
+
+    Parameters:
+        - windows: месяцы по возрастанию;
+        - sizes: число историй по месяцам `YYYY-MM`;
+        - page_size: историй на странице.
+
+    Returns:
+        Окна (первый, последний день); месяцы не из `windows` в них не попадают.
+    """
+
+    packed: list[tuple[date, date]] = []
+    filled = 0
+    for start, end in windows:
+        size = sizes.get(f"{start:%Y-%m}", 0)
+        adjacent = packed and start - packed[-1][1] == timedelta(days=1)
+        if adjacent and filled + size <= page_size:
+            packed[-1] = (packed[-1][0], end)
+            filled += size
+        else:
+            packed.append((start, end))
+            filled = size
+    return packed
+
+
 def download(api: SearchApi, settings: NewsSettings) -> None:
     """
-    Выкачать индекс историй помесячно в `index_dir`.
+    Выкачать индекс историй в `index_dir` окнами из одного или нескольких месяцев.
 
-    Готовые месяцы пропускаются, поэтому после исчерпания квоты прогон
-    продолжается с первого недокачанного месяца.
+    Скачанные месяцы пропускаются, поэтому после исчерпания квоты прогон
+    продолжается с первого недокачанного. Соседние малые месяцы идут одним
+    окном (`pack_months`): объём по месяцам - ещё один запрос.
 
     Parameters:
         - api: клиент поиска Media Cloud;
@@ -172,13 +228,26 @@ def download(api: SearchApi, settings: NewsSettings) -> None:
     """
 
     settings.index_dir.mkdir(parents=True, exist_ok=True)
-    for start, end in month_windows(settings.start_date, settings.end_date):
-        path = settings.index_dir / f"stories_{start:%Y-%m}.parquet"
-        if path.exists():
-            logger.info(f"{path.name} уже скачан")
-            continue
+    done = downloaded_months(settings.index_dir)
+    todo = [
+        window
+        for window in month_windows(settings.start_date, settings.end_date)
+        if f"{window[0]:%Y-%m}" not in done
+    ]
+    logger.info(f"Скачано месяцев: {len(done)}, осталось {len(todo)}")
+    if not todo:
+        return
+    monthly = count(api, settings)
+    sizes = dict(zip(monthly["month"], monthly["stories"], strict=True))
+    for start, end in pack_months(todo, sizes, settings.page_size):
+        name = (
+            f"{start:%Y-%m}"
+            if start.month == end.month and start.year == end.year
+            else f"{start:%Y-%m}_{end:%Y-%m}"
+        )
+        path = settings.index_dir / f"stories_{name}.parquet"
         frame = to_frame(list(iter_stories(api, settings, start, end)))
-        # Через временный файл: прерванный месяц не должен выглядеть готовым
+        # Через временный файл: прерванное окно не должно выглядеть готовым
         tmp = path.with_suffix(".tmp")
         frame.to_parquet(tmp, index=False)
         tmp.replace(path)

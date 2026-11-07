@@ -6,8 +6,9 @@
 # Lucene не проходят анализатор.
 #
 # [regions.<код>] - страна: коллекции Media Cloud (National и State & Local),
-# основные языки потока и full_stream - качать ли поток целиком (он
-# укладывается в квоту) или только кандидатов recall-запроса.
+# основные языки потока и full_stream - качать ли поток целиком или только
+# кандидатов recall-запроса. Целиком - только нефтяные страны Ближнего Востока
+# с потоком меньше миллиона историй: Ирак, Йемен, Оман, Сирия.
 
 [terms]
 common = [
@@ -411,7 +412,6 @@ languages = ["fr", "de", "en", "pt", "lb"]
 countries = ["MT"]
 collection_ids = [34412381]
 languages = ["en", "mt", "it"]
-full_stream = true
 
 # Netherlands - National; Netherlands - State & Local. 2015–2026: 13.11 млн историй; nl 99%
 [regions.nl]
