@@ -171,8 +171,8 @@ through oil and gas, but does not itself move the balance. Typical:
   gas-cylinder explosion, a car crash with a fuel truck, a lamp-oil fire,
   coal-mine gas (瓦斯) explosions, carbon-monoxide poisoning;
 - car-care tips about motor oil (the lubricant business itself is `related`);
-- general politics, war, crime, weather in producer countries with no oil or
-  gas element.
+- general politics, crime, weather and wars with no oil or gas element (see
+  rule 4 for wars involving major exporters).
 
 ## Borderline rules
 
@@ -194,7 +194,11 @@ through oil and gas, but does not itself move the balance. Typical:
 4. **Military and security.** Strikes, drone attacks, seizures, blockades or
    closures that hit or threaten oil and gas assets, tankers or chokepoints are
    `core` (`outages_disruptions`, `transport_logistics`), even if the headline
-   reads as war news. Fighting in a producer country with no energy element is
+   reads as war news. Strikes, wars and ceasefires between major oil and gas
+   exporters and their adversaries (Iran, Russia, the Gulf states, Iraq,
+   Venezuela) with no stated energy, shipping or sanctions element are
+   `related` (`sanctions_policy`) with confidence ≤ 0.7: they move the risk
+   premium, not the balance. Fighting elsewhere with no energy element is
    `none`.
 5. **Horizon.** Production or flows within about a year: `core`. Discoveries,
    licences, FIDs, plans and contracts that start later: `related`.

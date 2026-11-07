@@ -25,7 +25,7 @@ Status of knowledge: early November 2026. This file covers the USA, Mexico, Vene
    - energy force majeure
    - drone strikes on refineries, ports or CPC
 
-   A diplomatic Iran or Russia headline with no energy, shipping or sanctions angle is at most related.
+   A military or diplomatic Iran or Russia headline with no energy, shipping or sanctions angle is related, not core.
 6. **Check the date; entities change.** Examples:
    - UAE was in OPEC until 30 Apr 2026.
    - Pioneer was independent until May 2024.
