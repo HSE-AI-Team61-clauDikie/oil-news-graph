@@ -41,6 +41,7 @@ class NewsSettings(BaseSettings):
         description="Одновременных загрузок с одного сайта",
     )
     request_timeout: float = 20.0
+    accept_language: str = "ru,en;q=0.8"
     user_agent: str = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/130.0 Safari/537.36"
@@ -63,7 +64,11 @@ class NewsSettings(BaseSettings):
         description="Статей в part-файле этапа Wayback: он медленный, сохраняем чаще",
     )
 
-    title_exclude: str = Field(
+    use_wayback: bool = Field(
+        default=True,
+        description="Искать в Wayback статьи, не давшие текста на сайте",
+    )
+    title_exclude: str | None = Field(
         default=r"нефтехимик|нефтчи|опек(?!\b|\+)",
         description="Регулярка заголовков-шума: спортклубы, опека и опекуны",
     )
@@ -76,7 +81,104 @@ class NewsSettings(BaseSettings):
         description="Во сколько раз день выше медианы источника, чтобы быть кластером",
     )
 
+    sample_candidates: int = Field(
+        default=25,
+        description="Историй recall-запроса на год региона",
+    )
+    sample_background: int = Field(
+        default=10,
+        description="Историй вне recall-запроса на год региона: оценка его пропусков",
+    )
+    sample_background_days: int = Field(
+        default=6,
+        description="Случайных дней, из которых берётся фон региона",
+    )
+    sample_min_days: int = Field(
+        default=3,
+        description="Не меньше стольких дней на год в выборке кандидатов",
+    )
+    sample_max_days: int = Field(
+        default=15,
+        description="Не больше стольких дней на год в выборке кандидатов",
+    )
+    sample_query_bytes: int = Field(
+        default=4600,
+        description="Длина запроса после URL-кодирования, дальше Media Cloud - 400",
+    )
+    gold_size: int = Field(default=600, description="Историй в gold-наборе")
+    sample_dir: Path = Path("data/interim/news/sample")
+
     index_dir: Path = Path("data/raw/news/mediacloud")
+    labels_dir: Path = Path("data/interim/news/labels")
     stories_path: Path = Path("data/interim/news/stories.parquet")
+    filtered_dir: Path = Path("data/interim/news/filtered")
+    candidates_path: Path = Path("data/interim/news/candidates.parquet")
+    title_model_dir: Path = Path("data/models/news/title")
     fulltext_dir: Path = Path("data/raw/news/fulltext")
     dataset_path: Path = Path("data/processed/news/ru_oil_news.parquet")
+
+
+class LabelingSettings(BaseSettings):
+    """
+    Настройки разметки новостей через DeepSeek.
+
+    Значения берутся из окружения и `.env` в корне репозитория.
+    """
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    deepseek_api_key: SecretStr = SecretStr("")
+    base_url: str = "https://api.deepseek.com"
+    model: str = Field(default="deepseek-flash", description="Основная разметка")
+    review_model: str = Field(
+        default="deepseek-v4-pro",
+        description="Второе мнение: gold, неуверенные и контрольная доля",
+    )
+    review_below: float = Field(
+        default=0.6,
+        description="Уверенность основной модели, ниже которой нужен review",
+    )
+    review_share: float = Field(
+        default=0.05,
+        description="Случайная доля выборки на контрольный review",
+    )
+    concurrency: int = Field(default=32, description="Одновременных запросов")
+    request_timeout: float = 120.0
+    max_tokens: int = 300
+    attempts: int = Field(default=5, description="Попыток на запрос")
+    lead_chars: int = Field(default=500, description="Символов текста в лиде")
+    batch_size: int = Field(default=500, description="Ответов в одном part-файле")
+
+
+class ClassifierSettings(BaseSettings):
+    """Настройки классификатора нефтяных новостей."""
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    embedders: dict[str, str] = Field(
+        default={
+            "intfloat/multilingual-e5-base": "query: ",
+            "intfloat/multilingual-e5-large": "query: ",
+            "BAAI/bge-m3": "",
+            "sentence-transformers/LaBSE": "",
+            "sentence-transformers/paraphrase-multilingual-mpnet-base-v2": "",
+        },
+        description="Модели эмбеддингов и префикс текста, которого они ждут",
+    )
+    batch_size: int = 64
+    max_length: int = Field(default=256, description="Токенов текста на эмбеддинг")
+    folds: int = 5
+    test_from_year: int = Field(
+        default=2024,
+        description="Временной сплит: обучение до этого года, тест с него",
+    )
+    min_language_positives: int = Field(
+        default=10,
+        description="Меньше положительных - язык не входит в macro-среднее",
+    )
+    target_precision: float = 0.9
+    target_core_recall: float = Field(
+        default=0.95,
+        description="Recall ядра, под который подбирается порог отсева",
+    )
+    models_dir: Path = Path("data/models/news")

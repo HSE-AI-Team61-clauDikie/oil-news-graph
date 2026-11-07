@@ -118,12 +118,14 @@ def assemble(settings: NewsSettings) -> pd.DataFrame:
     """
 
     stories = pd.read_parquet(settings.stories_path)
-    noise = stories["title"].str.contains(
-        settings.title_exclude,
-        case=False,
-        regex=True,
-        na=False,
-    )
+    noise = pd.Series(data=False, index=stories.index)
+    if settings.title_exclude:
+        noise = stories["title"].str.contains(
+            settings.title_exclude,
+            case=False,
+            regex=True,
+            na=False,
+        )
     stories = stories[~noise]
     articles = read_articles(settings)
     junk = junk_mask(articles, settings.junk_repeats)

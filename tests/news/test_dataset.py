@@ -182,3 +182,28 @@ def test_assemble_drops_noise_and_junk_and_marks_reprints(
     assert pd.isna(dataset.loc["other", "duplicate_of"])
     assert dataset.loc["tass", "url"] == "https://tass.ru/1"
     assert set(dataset["date_source"]) == {"media_cloud"}
+
+
+def test_assemble_without_title_filter_keeps_all_titles(
+    settings: NewsSettings,
+) -> None:
+    pd.DataFrame(
+        {
+            "story_id": ["opec", "hockey"],
+            "url": ["https://a.com/1", "https://b.com/1"],
+            "publish_date": pd.to_datetime(["2026-10-01", "2026-10-02"]),
+            "media_name": ["a.com", "b.com"],
+            "title": ["OPEC cuts output", "«Нефтехимик» обыграл «Ладу»"],
+        },
+    ).to_parquet(settings.stories_path)
+    settings.fulltext_dir.mkdir()
+    pd.DataFrame(
+        [
+            article("opec", "https://a.com/1", TEXT),
+            article("hockey", "https://b.com/1", "Hockey match report " * 20),
+        ],
+    ).to_parquet(settings.fulltext_dir / "part-00000.parquet")
+
+    dataset = assemble(settings.model_copy(update={"title_exclude": None}))
+
+    assert sorted(dataset["story_id"]) == ["hockey", "opec"]
