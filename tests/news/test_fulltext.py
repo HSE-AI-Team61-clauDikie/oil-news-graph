@@ -1,3 +1,4 @@
+import ssl
 from collections.abc import Callable
 from datetime import date
 from pathlib import Path
@@ -150,6 +151,25 @@ async def test_live_page_gives_text(settings: NewsSettings) -> None:
     assert "ОПЕК+" in article.text
     assert "Главная" not in article.text
     assert article.extracted_title == "Нефть дорожает"
+
+
+async def test_tls_failure_is_an_error_not_a_crash(settings: NewsSettings) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        msg = "decryption failed or bad record mac"
+        raise ssl.SSLError(msg)
+
+    article = await make_fetcher(settings, handler).fetch_live("1", "https://x.ru/1")
+
+    assert article.text_source == "none"
+    assert article.error.startswith("SSLError")
+
+
+async def test_relative_url_is_skipped(settings: NewsSettings) -> None:
+    fetcher = make_fetcher(settings, lambda _: httpx.Response(500))
+
+    article = await fetcher.fetch_live("1", "/mersin-haberleri/1")
+
+    assert article.error == "адрес без схемы"
 
 
 async def test_archived_page_comes_from_wayback(settings: NewsSettings) -> None:

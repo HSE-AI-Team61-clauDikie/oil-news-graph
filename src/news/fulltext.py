@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import logging
 import re
+import ssl
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field, fields, replace
@@ -70,12 +71,15 @@ class ArticleFetcher:
             Статья с `text_source="live"` или с ошибкой.
         """
 
+        if not url.startswith(("http://", "https://")):
+            return Article(story_id, url, error="адрес без схемы")
         try:
             # Сначала слот сайта, потом общий: задача, ждущая занятый сайт,
             # не должна держать общий слот и тормозить остальные сайты
             async with self.host_limits[urlsplit(url).netloc], self.limit:
                 response = await self.client.get(url)
-        except httpx.HTTPError as error:
+        # Обрыв TLS на чтении тела httpx не оборачивает в свою ошибку
+        except (httpx.HTTPError, ssl.SSLError) as error:
             return Article(story_id, url, error=f"{type(error).__name__}: {error}")
         if response.status_code != httpx.codes.OK:
             return Article(
