@@ -161,6 +161,25 @@ uv run --group ml python -m news benchmark --field title
 uv run --group ml python -m news train --field title --embedder intfloat/multilingual-e5-base
 ```
 
+Прогон региона (`us` — имя из `regions.toml`); каждая команда пропускает
+сделанное, поэтому её можно прерывать и перезапускать:
+
+```bash
+uv run python -m news --region us count
+uv run python -m news --region us download
+uv run python -m news --region us merge
+uv run --group ml python -m news --region us filter
+uv run python -m news --region us fulltext --newest-first
+uv run python -m news --region us assemble
+```
+
+`filter` оценивает каждый месячный файл индекса моделью заголовков
+(`data/models/news/title/meta.json`, лежит в git; энкодер скачивается с Hugging
+Face) и собирает `candidates.parquet` — истории с `decision` `keep` или
+`borderline` и вероятностью `probability`. `fulltext` и `assemble` региона
+работают только с ними. В итоговом датасете вероятность сохраняется: порог
+можно ужесточить без нового прогона.
+
 - **`regions.toml`** — страна на регион: коллекции Media Cloud (National и
   State & Local), языки потока с долей от 1% и `full_stream`. Recall-термины
   заголовка заданы по языкам в `[terms]`; регион получает `common`, термины
@@ -264,6 +283,8 @@ uv run --group ml python -m news train --field title --embedder intfloat/multili
 | `data/interim/news/sample/gold.parquet` | gold-набор для ручной проверки |
 | `data/raw/news/sample/fulltext/part-NNNNN.parquet` | тексты выборки |
 | `data/interim/news/labels/{модель}/part-NNNNN.parquet` | ответы DeepSeek |
+| `data/interim/news/{регион}/filtered/stories_YYYY-MM.parquet` | вероятность и решение по каждой истории месяца |
+| `data/interim/news/{регион}/candidates.parquet` | прошедшие фильтр истории индекса |
 | `data/models/news/benchmark-{поле}.csv` | сравнение моделей эмбеддингов |
 | `data/models/news/{поле}/meta.json` | энкодер, веса регрессии, пороги и метрики; `title` лежит в git |
 

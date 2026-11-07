@@ -61,6 +61,10 @@ def parse_args() -> argparse.Namespace:
     )
     commands.add_parser("assemble", help="собрать итоговый датасет")
     commands.add_parser(
+        "filter",
+        help="оценить заголовки индекса региона классификатором (нужен --region)",
+    )
+    commands.add_parser(
         "sample",
         parents=[period],
         help="выборка регион × год на разметку; с --region - один регион",
@@ -231,6 +235,29 @@ def classifier_command(
         classifier.fit(args.embedder, frame, args.field, classifier_settings)
 
 
+def filter_region(settings: NewsSettings, region: str | None) -> None:
+    """
+    Оценить заголовки индекса региона и собрать прошедшие фильтр.
+
+    Parameters:
+        - settings: пути региона и модель заголовков;
+        - region: имя региона.
+
+    Raises:
+        SystemExit: регион не задан.
+    """
+
+    if not region:
+        msg = "filter работает по региону: python -m news --region <имя> filter"
+        raise SystemExit(msg)
+    # torch и sentence-transformers - в группе ml: без неё сбор и разметка работают
+    from news import filtering
+    from news.classifier import OilClassifier
+
+    filtering.filter_index(settings, OilClassifier(settings.title_model_dir))
+    filtering.candidates(settings)
+
+
 def main() -> None:
     """Выполнить команду CLI."""
 
@@ -252,6 +279,11 @@ def main() -> None:
         settings = sampling.sample_settings(settings)
     elif args.region and args.command != "sample":
         settings = regions[args.region].settings(settings)
+        if args.command in {"fulltext", "assemble"}:
+            # В регионе тексты качаются только для прошедших фильтр заголовков
+            settings = settings.model_copy(
+                update={"stories_path": settings.candidates_path},
+            )
     period = {
         "start_date": getattr(args, "start", None),
         "end_date": getattr(args, "end", None),
@@ -282,6 +314,7 @@ def main() -> None:
         "label": lambda: label_sample(settings, regions, review=args.review),
         "benchmark": lambda: classifier_command(settings, regions, args),
         "train": lambda: classifier_command(settings, regions, args),
+        "filter": lambda: filter_region(settings, args.region),
     }
     commands[args.command]()
 

@@ -111,6 +111,9 @@ class NewsSettings(BaseSettings):
     index_dir: Path = Path("data/raw/news/mediacloud")
     labels_dir: Path = Path("data/interim/news/labels")
     stories_path: Path = Path("data/interim/news/stories.parquet")
+    filtered_dir: Path = Path("data/interim/news/filtered")
+    candidates_path: Path = Path("data/interim/news/candidates.parquet")
+    title_model_dir: Path = Path("data/models/news/title")
     fulltext_dir: Path = Path("data/raw/news/fulltext")
     dataset_path: Path = Path("data/processed/news/ru_oil_news.parquet")
 

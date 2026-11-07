@@ -87,6 +87,10 @@ class Region(BaseModel):
                 "stories_path": Path("data/interim/news")
                 / self.name
                 / "stories.parquet",
+                "filtered_dir": Path("data/interim/news") / self.name / "filtered",
+                "candidates_path": Path("data/interim/news")
+                / self.name
+                / "candidates.parquet",
                 "fulltext_dir": Path("data/raw/news") / self.name / "fulltext",
                 "dataset_path": (
                     Path("data/processed/news") / self.name / "oil_news.parquet"
