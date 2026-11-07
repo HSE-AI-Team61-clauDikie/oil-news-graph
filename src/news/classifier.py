@@ -3,7 +3,6 @@ import logging
 import time
 from pathlib import Path
 
-import joblib
 import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
@@ -322,7 +321,7 @@ def fit(
         - settings: параметры оценки и каталог моделей.
 
     Returns:
-        Каталог модели: `model.joblib` и `meta.json`.
+        Каталог модели с `meta.json`: энкодер, веса регрессии, пороги, метрики.
     """
 
     features, seconds = embed(model_name, frame, field, settings)
@@ -334,12 +333,14 @@ def fit(
 
     out_dir = settings.models_dir / field
     out_dir.mkdir(parents=True, exist_ok=True)
-    joblib.dump(model, out_dir / "model.joblib")
+    # Веса в JSON, а не pickle: файл переносим между версиями sklearn и лежит в git
     meta = {
         "embedder": model_name,
         "prefix": settings.embedders[model_name],
         "field": field,
         "max_length": settings.max_length,
+        "coef": model.coef_[0].round(8).tolist(),
+        "intercept": float(model.intercept_[0]),
         "thresholds": thresholds(target, core, scores, settings),
         "metrics": evaluate(features, frame, settings),
         "seconds_per_1000": seconds,
@@ -350,25 +351,37 @@ def fit(
     return out_dir
 
 
-def predict(texts: list[str], model_dir: Path, batch_size: int = 64) -> np.ndarray:
+class OilClassifier:
     """
-    Вероятность «ядро или связано» для текстов.
+    Обученный классификатор: энкодер и логистическая регрессия над ним.
 
-    Parameters:
-        - texts: заголовки или «заголовок + лид», как при обучении;
-        - model_dir: каталог из `fit`;
-        - batch_size: текстов в батче энкодера.
-
-    Returns:
-        Вероятности в порядке `texts`.
+    Энкодер загружается один раз: на прогоне индекса модель зовётся
+    на каждый месяц каждого региона.
     """
 
-    meta = json.loads((model_dir / "meta.json").read_text(encoding="utf-8"))
-    encoder = load_encoder(meta["embedder"], meta["max_length"])
-    vectors = encoder.encode(
-        [meta["prefix"] + text for text in texts],
-        batch_size=batch_size,
-        normalize_embeddings=True,
-    )
-    model: LogisticRegression = joblib.load(model_dir / "model.joblib")
-    return model.predict_proba(vectors)[:, 1]
+    def __init__(self, model_dir: Path) -> None:
+        self.meta: dict = json.loads(
+            (model_dir / "meta.json").read_text(encoding="utf-8"),
+        )
+        self.encoder = load_encoder(self.meta["embedder"], self.meta["max_length"])
+        self.coef = np.asarray(self.meta["coef"])
+        self.intercept = float(self.meta["intercept"])
+
+    def predict(self, texts: list[str], batch_size: int = 64) -> np.ndarray:
+        """
+        Вероятность «ядро или связано» для текстов.
+
+        Parameters:
+            - texts: заголовки или «заголовок + лид», как при обучении;
+            - batch_size: текстов в батче энкодера.
+
+        Returns:
+            Вероятности в порядке `texts`.
+        """
+
+        vectors = self.encoder.encode(
+            [self.meta["prefix"] + text for text in texts],
+            batch_size=batch_size,
+            normalize_embeddings=True,
+        )
+        return 1 / (1 + np.exp(-(vectors @ self.coef + self.intercept)))

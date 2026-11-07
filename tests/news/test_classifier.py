@@ -1,10 +1,17 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from news.classifier import evaluate, recall_at_precision, thresholds, training_frame
+from news.classifier import (
+    OilClassifier,
+    evaluate,
+    recall_at_precision,
+    thresholds,
+    training_frame,
+)
 from news.settings import ClassifierSettings
 
 
@@ -105,3 +112,43 @@ def test_thresholds_keep_core_recall() -> None:
     kept = (scores[core == 1] >= cuts["drop"]).mean()
     assert kept >= 0.9
     assert cuts["keep"] >= cuts["drop"]
+
+
+class FakeEncoder:
+    """Эмбеддинг - длина текста и единица."""
+
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    def encode(self, texts: list[str], **_) -> np.ndarray:
+        """
+        Векторы текстов.
+
+        Returns:
+            Матрица (число текстов, 2).
+        """
+
+        self.texts += texts
+        return np.array([[len(text), 1.0] for text in texts])
+
+
+def test_oil_classifier_applies_prefix_and_weights(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meta = {
+        "embedder": "fake",
+        "prefix": "q: ",
+        "max_length": 8,
+        "coef": [1.0, -5.0],
+        "intercept": 0.0,
+    }
+    (tmp_path / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    encoder = FakeEncoder()
+    monkeypatch.setattr("news.classifier.load_encoder", lambda *_: encoder)
+
+    scores = OilClassifier(tmp_path).predict(["ab", "abcdefg"])
+
+    assert encoder.texts == ["q: ab", "q: abcdefg"]
+    # 5 - 5 = 0 -> 0.5; 10 - 5 = 5 -> sigmoid(5)
+    assert scores == pytest.approx([0.5, 1 / (1 + np.exp(-5))])

@@ -265,7 +265,7 @@ uv run --group ml python -m news train --field title --embedder intfloat/multili
 | `data/raw/news/sample/fulltext/part-NNNNN.parquet` | тексты выборки |
 | `data/interim/news/labels/{модель}/part-NNNNN.parquet` | ответы DeepSeek |
 | `data/models/news/benchmark-{поле}.csv` | сравнение моделей эмбеддингов |
-| `data/models/news/{поле}/` | `model.joblib` и `meta.json` с порогами |
+| `data/models/news/{поле}/meta.json` | энкодер, веса регрессии, пороги и метрики; `title` лежит в git |
 
 ## Ограничения
 

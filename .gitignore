@@ -19,7 +19,10 @@ __pycache__/
 # Data
 *.parquet
 data/external/*
-data/models/
+data/models/**
+!data/models/news/
+!data/models/news/title/
+!data/models/news/title/meta.json
 data/interim/news/sample/gold_review.xlsx
 
 !data/raw/.gitkeep
