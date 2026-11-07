@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import logging
 import re
+import ssl
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field, fields, replace
@@ -70,12 +71,15 @@ class ArticleFetcher:
             Статья с `text_source="live"` или с ошибкой.
         """
 
+        if not url.startswith(("http://", "https://")):
+            return Article(story_id, url, error="адрес без схемы")
         try:
             # Сначала слот сайта, потом общий: задача, ждущая занятый сайт,
             # не должна держать общий слот и тормозить остальные сайты
             async with self.host_limits[urlsplit(url).netloc], self.limit:
                 response = await self.client.get(url)
-        except httpx.HTTPError as error:
+        # Обрыв TLS на чтении тела httpx не оборачивает в свою ошибку
+        except (httpx.HTTPError, ssl.SSLError) as error:
             return Article(story_id, url, error=f"{type(error).__name__}: {error}")
         if response.status_code != httpx.codes.OK:
             return Article(
@@ -367,8 +371,8 @@ async def run(
     """
     Скачать тексты для индекса `stories_path` в part-файлы.
 
-    Сначала живые страницы всех статей, потом Wayback для тех, что не дали
-    текста: медленный archive.org не задерживает живые страницы. Скачанное
+    Сначала живые страницы всех статей, потом, если `use_wayback`, Wayback для
+    тех, что не дали текста: медленный archive.org не задерживает живые. Скачанное
     раньше пропускается; с `retry_failed` статьи без текста идут заново.
 
     Parameters:
@@ -389,7 +393,7 @@ async def run(
     async with httpx.AsyncClient(
         headers={
             "User-Agent": settings.user_agent,
-            "Accept-Language": "ru,en;q=0.8",
+            "Accept-Language": settings.accept_language,
         },
         timeout=settings.request_timeout,
         follow_redirects=True,
@@ -404,6 +408,8 @@ async def run(
             lambda row: fetcher.fetch_live(row.story_id, row.url),
             settings.batch_size,
         )
+        if not settings.use_wayback:
+            return
 
         # Порядок задаёт stories: merge сохраняет порядок левой таблицы
         wayback_todo = stories[["story_id", "publish_date"]].merge(
