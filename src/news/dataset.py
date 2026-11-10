@@ -6,6 +6,7 @@ import pandas as pd
 
 from news.fulltext import junk_mask, read_articles, text_fingerprint
 from news.settings import NewsSettings
+from news.storage import write_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -141,8 +142,7 @@ def assemble(settings: NewsSettings) -> pd.DataFrame:
     dataset["text_hash"] = dataset["text"].map(text_fingerprint)
     first = dataset.groupby("text_hash")["story_id"].transform("first")
     dataset["duplicate_of"] = first.where(first != dataset["story_id"])
-    settings.dataset_path.parent.mkdir(parents=True, exist_ok=True)
-    dataset.to_parquet(settings.dataset_path, index=False)
+    write_atomic(dataset, settings.dataset_path)
     sources = dataset["date_source"].value_counts().to_dict()
     logger.info(
         f"{settings.dataset_path}: {len(dataset)} статей, "

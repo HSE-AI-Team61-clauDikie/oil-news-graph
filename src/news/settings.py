@@ -114,6 +114,16 @@ class NewsSettings(BaseSettings):
     filtered_dir: Path = Path("data/interim/news/filtered")
     candidates_path: Path = Path("data/interim/news/candidates.parquet")
     title_model_dir: Path = Path("data/models/news/title")
+    filter_device: str | None = Field(
+        default=None,
+        description="Устройство классификатора: cuda:0, cpu; None - автовыбор",
+    )
+    filter_batch_size: int = Field(default=64, ge=1)
+    fulltext_region_limit: int | None = Field(
+        default=None,
+        ge=1,
+        description="Живых страниц на регион за проход; None - без ограничения",
+    )
     fulltext_dir: Path = Path("data/raw/news/fulltext")
     dataset_path: Path = Path("data/processed/news/ru_oil_news.parquet")
 

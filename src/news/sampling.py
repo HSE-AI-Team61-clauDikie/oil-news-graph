@@ -10,6 +10,7 @@ from mediacloud.api import SearchApi
 from news.mediacloud import normalize_url, retrying, to_frame
 from news.regions import Region
 from news.settings import NewsSettings
+from news.storage import write_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -372,23 +373,6 @@ def sample_region(
     )
     frame.insert(0, "region", region.name)
     return frame
-
-
-def write_atomic(frame: pd.DataFrame, path: Path) -> None:
-    """
-    Записать parquet через временный файл.
-
-    Прерванная запись не должна выглядеть готовым файлом.
-
-    Parameters:
-        - frame: таблица;
-        - path: итоговый путь.
-    """
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    frame.to_parquet(tmp, index=False)
-    tmp.replace(path)
 
 
 def collect(

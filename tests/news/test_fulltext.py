@@ -341,6 +341,34 @@ async def test_run_newest_first_goes_from_fresh_to_old(
     assert requested == ["/2026", "/2020", "/2015"]
 
 
+async def test_run_limit_resumes_with_next_unfetched_articles(
+    settings: NewsSettings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pd.DataFrame(
+        {
+            "story_id": ["old", "middle", "new"],
+            "url": [f"https://a.ru/{key}" for key in ["old", "middle", "new"]],
+            "publish_date": pd.to_datetime(["2020-01-01", "2023-01-01", "2026-01-01"]),
+        },
+    ).to_parquet(settings.stories_path)
+    requested = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, content=article_html())
+
+    patch_client(monkeypatch, handler)
+    settings = settings.model_copy(update={"use_wayback": False})
+    await run(settings, newest_first=True, max_articles=2)
+    assert requested == ["/new", "/middle"]
+    assert len(read_articles(settings)) == 2
+
+    await run(settings, newest_first=True, max_articles=2)
+    assert requested == ["/new", "/middle", "/old"]
+    assert len(read_articles(settings)) == 3
+
+
 def test_junk_mask_finds_templates_and_homepage_redirects() -> None:
     footer = "© 1992-2026 АО ИА «Башинформ». Все права защищены."
     articles = articles_frame(
