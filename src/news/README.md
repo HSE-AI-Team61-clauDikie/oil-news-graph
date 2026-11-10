@@ -161,8 +161,12 @@ uv run --group ml python -m news benchmark --field title
 uv run --group ml python -m news train --field title --embedder intfloat/multilingual-e5-base
 ```
 
-Полный прогон всех регионов — `run --stage download` и `run --stage process`,
-инструкция с оценками времени — [`docs/run_regions.md`](../../docs/run_regions.md).
+Текущий запуск докачивает US → SA → AE → IT → ES → OM → AZ последовательно
+одним ключом из `.env` и обрабатывает
+все уже прибывшие регионы, включая частичные индексы. Классификация, загрузка
+текстов и снимки датасетов работают независимо: `run --stage filter`,
+`run --stage fulltext`, `run --stage assemble`. Launcher и ручные команды —
+[`docs/run_regions.md`](../../docs/run_regions.md).
 Ход прогона по регионам — `status`, лог — `data/logs/news.log`.
 
 Прогон региона (`us` — имя из `regions.toml`); каждая команда пропускает

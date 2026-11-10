@@ -15,7 +15,12 @@ from news.settings import ClassifierSettings
 logger = logging.getLogger(__name__)
 
 
-def load_encoder(model_name: str, max_length: int) -> SentenceTransformer:
+def load_encoder(
+    model_name: str,
+    max_length: int,
+    *,
+    device: str | None = None,
+) -> SentenceTransformer:
     """
     Загрузить модель эмбеддингов.
 
@@ -25,17 +30,19 @@ def load_encoder(model_name: str, max_length: int) -> SentenceTransformer:
     Parameters:
         - model_name: модель sentence-transformers;
         - max_length: токенов текста на эмбеддинг.
+        - device: устройство; None - автовыбор sentence-transformers.
 
     Returns:
         Модель с ограничением длины.
     """
 
     try:
-        model = SentenceTransformer(model_name, trust_remote_code=True)
+        model = SentenceTransformer(model_name, trust_remote_code=True, device=device)
     except OSError:
         model = SentenceTransformer(
             model_name,
             trust_remote_code=True,
+            device=device,
             model_kwargs={"use_safetensors": False},
         )
     model.max_seq_length = max_length
@@ -359,29 +366,42 @@ class OilClassifier:
     на каждый месяц каждого региона.
     """
 
-    def __init__(self, model_dir: Path) -> None:
+    def __init__(
+        self,
+        model_dir: Path,
+        *,
+        device: str | None = None,
+        batch_size: int = 64,
+    ) -> None:
         self.meta: dict = json.loads(
             (model_dir / "meta.json").read_text(encoding="utf-8"),
         )
-        self.encoder = load_encoder(self.meta["embedder"], self.meta["max_length"])
+        self.encoder = load_encoder(
+            self.meta["embedder"],
+            self.meta["max_length"],
+            device=device,
+        )
+        self.batch_size = batch_size
         self.coef = np.asarray(self.meta["coef"])
         self.intercept = float(self.meta["intercept"])
 
-    def predict(self, texts: list[str], batch_size: int = 64) -> np.ndarray:
+    def predict(self, texts: list[str], batch_size: int | None = None) -> np.ndarray:
         """
         Вероятность «ядро или связано» для текстов.
 
         Parameters:
             - texts: заголовки или «заголовок + лид», как при обучении;
-            - batch_size: текстов в батче энкодера.
+            - batch_size: текстов в батче энкодера; None - размер из конструктора.
 
         Returns:
             Вероятности в порядке `texts`.
         """
 
+        if not texts:
+            return np.empty(0)
         vectors = self.encoder.encode(
             [self.meta["prefix"] + text for text in texts],
-            batch_size=batch_size,
+            batch_size=batch_size or self.batch_size,
             normalize_embeddings=True,
         )
         return 1 / (1 + np.exp(-(vectors @ self.coef + self.intercept)))

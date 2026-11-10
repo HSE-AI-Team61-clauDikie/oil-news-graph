@@ -4,8 +4,8 @@ import numpy as np
 import pandas as pd
 
 from news.classifier import OilClassifier
-from news.sampling import write_atomic
 from news.settings import NewsSettings
+from news.storage import write_atomic
 
 logger = logging.getLogger(__name__)
 

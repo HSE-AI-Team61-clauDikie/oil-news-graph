@@ -72,9 +72,12 @@ def parse_args() -> argparse.Namespace:
     )
     run.add_argument(
         "--stage",
-        choices=["download", "process"],
+        choices=["download", "filter", "fulltext", "assemble", "process"],
         required=True,
-        help="download: индекс и склейка; process: filter, fulltext, assemble",
+        help=(
+            "download: индекс; filter: заголовки; fulltext: тексты; "
+            "assemble: сохранённые тексты; process: все этапы обработки"
+        ),
     )
     run.add_argument("--only", help="регионы через запятую, например us,sa")
     commands.add_parser(
@@ -271,7 +274,12 @@ def filter_region(settings: NewsSettings, region: str | None) -> None:
     from news import filtering
     from news.classifier import OilClassifier
 
-    filtering.filter_index(settings, OilClassifier(settings.title_model_dir))
+    model = OilClassifier(
+        settings.title_model_dir,
+        device=settings.filter_device,
+        batch_size=settings.filter_batch_size,
+    )
+    filtering.filter_index(settings, model)
     filtering.candidates(settings)
 
 
@@ -295,11 +303,12 @@ def download_regions(base: NewsSettings, regions: list[Region], period: dict) ->
         mediacloud.merge(settings)
 
 
-def process_regions(base: NewsSettings, regions: list[Region], period: dict) -> None:
+def filter_regions(base: NewsSettings, regions: list[Region], period: dict) -> None:
     """
-    Отфильтровать склеенный индекс регионов, скачать тексты и собрать датасеты.
+    Склеить доступные окна индекса и оценить заголовки всех прибывших регионов.
 
-    Регионы без склеенного индекса пропускаются: их ещё качает `download`.
+    Неполные регионы тоже обрабатываются. После следующей загрузки новые окна
+    попадут в склейку и фильтр, уже оценённые окна повторно не считаются.
 
     Parameters:
         - base: общие настройки и модель заголовков;
@@ -311,18 +320,84 @@ def process_regions(base: NewsSettings, regions: list[Region], period: dict) -> 
     from news import filtering
     from news.classifier import OilClassifier
 
-    model = OilClassifier(base.title_model_dir)
+    model = None
     for region in regions:
         settings = region.settings(base).model_copy(update=period)
-        if not settings.stories_path.exists():
-            logger.info(f"{region.name}: индекс ещё не склеен, пропущен")
+        paths = sorted(settings.index_dir.glob("stories_*.parquet"))
+        if not paths:
+            logger.info(f"{region.name}: нет скачанных окон индекса, пропущен")
             continue
-        logger.info(f"{region.name}: фильтр, тексты, датасет")
-        filtering.filter_index(settings, model)
-        filtering.candidates(settings)
+        logger.info(f"{region.name}: фильтр доступных окон индекса")
+        if not settings.stories_path.exists() or any(
+            path.stat().st_mtime_ns > settings.stories_path.stat().st_mtime_ns
+            for path in paths
+        ):
+            mediacloud.merge(settings)
+        pending = [
+            path for path in paths if not (settings.filtered_dir / path.name).exists()
+        ]
+        if pending:
+            if model is None:
+                model = OilClassifier(
+                    base.title_model_dir,
+                    device=base.filter_device,
+                    batch_size=base.filter_batch_size,
+                )
+            filtering.filter_index(settings, model)
+        scores = list(settings.filtered_dir.glob("stories_*.parquet"))
+        if not settings.candidates_path.exists() or any(
+            path.stat().st_mtime_ns > settings.candidates_path.stat().st_mtime_ns
+            for path in [settings.stories_path, *scores]
+        ):
+            filtering.candidates(settings)
+
+
+def assemble_regions(base: NewsSettings, regions: list[Region], period: dict) -> None:
+    """Собрать датасеты из сохранённых текстов, без сети и загрузки энкодера."""
+
+    for region in regions:
+        settings = region.settings(base).model_copy(update=period)
+        parts = list(settings.fulltext_dir.glob("part-*.parquet"))
+        if not settings.candidates_path.exists() or not parts:
+            continue
+        if settings.dataset_path.exists() and all(
+            path.stat().st_mtime_ns <= settings.dataset_path.stat().st_mtime_ns
+            for path in [settings.candidates_path, *parts]
+        ):
+            continue
+        logger.info(f"{region.name}: датасет из сохранённых текстов")
         kept = settings.model_copy(update={"stories_path": settings.candidates_path})
-        asyncio.run(fulltext.run(kept, newest_first=True))
         dataset.assemble(kept)
+
+
+def fulltext_regions(base: NewsSettings, regions: list[Region], period: dict) -> None:
+    """Скачать тексты готовых кандидатов без классификации; собрать датасеты."""
+
+    assemble_regions(base, regions, period)
+    for region in regions:
+        settings = region.settings(base).model_copy(update=period)
+        if not settings.candidates_path.exists():
+            continue
+        logger.info(f"{region.name}: тексты и датасет")
+        kept = settings.model_copy(update={"stories_path": settings.candidates_path})
+        try:
+            asyncio.run(
+                fulltext.run(
+                    kept,
+                    newest_first=True,
+                    max_articles=base.fulltext_region_limit,
+                ),
+            )
+        finally:
+            assemble_regions(base, [region], period)
+
+
+def process_regions(base: NewsSettings, regions: list[Region], period: dict) -> None:
+    """Собрать сохранённое, оценить все прибывшие регионы, затем скачать тексты."""
+
+    assemble_regions(base, regions, period)
+    filter_regions(base, regions, period)
+    fulltext_regions(base, regions, period)
 
 
 def run_regions(
@@ -353,8 +428,14 @@ def run_regions(
         for name, value in {"start_date": args.start, "end_date": args.end}.items()
         if value
     }
-    stage = download_regions if args.stage == "download" else process_regions
-    stage(base, chosen, period)
+    stages = {
+        "download": download_regions,
+        "filter": filter_regions,
+        "fulltext": fulltext_regions,
+        "assemble": assemble_regions,
+        "process": process_regions,
+    }
+    stages[args.stage](base, chosen, period)
 
 
 def main() -> None:

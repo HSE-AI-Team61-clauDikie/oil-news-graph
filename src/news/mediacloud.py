@@ -19,6 +19,7 @@ from tenacity import (
 )
 
 from news.settings import NewsSettings
+from news.storage import write_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -257,9 +258,7 @@ def download(api: SearchApi, settings: NewsSettings) -> None:
         path = settings.index_dir / f"stories_{name}.parquet"
         frame = to_frame(list(iter_stories(api, settings, start, end)))
         # Через временный файл: прерванное окно не должно выглядеть готовым
-        tmp = path.with_suffix(".tmp")
-        frame.to_parquet(tmp, index=False)
-        tmp.replace(path)
+        write_atomic(frame, path)
         logger.info(f"{path.name}: {len(frame)} историй, окно {number}/{len(windows)}")
 
 
@@ -316,8 +315,7 @@ def merge(settings: NewsSettings) -> pd.DataFrame:
         .drop(columns="url_key")
         .reset_index(drop=True)
     )
-    settings.stories_path.parent.mkdir(parents=True, exist_ok=True)
-    stories.to_parquet(settings.stories_path, index=False)
+    write_atomic(stories, settings.stories_path)
     logger.info(f"{settings.stories_path}: {len(stories)} из {len(frame)} историй")
     return stories
 

@@ -119,6 +119,7 @@ class FakeEncoder:
 
     def __init__(self) -> None:
         self.texts: list[str] = []
+        self.batch_size: int | None = None
 
     def encode(self, texts: list[str], **_) -> np.ndarray:
         """
@@ -129,6 +130,7 @@ class FakeEncoder:
         """
 
         self.texts += texts
+        self.batch_size = _["batch_size"]
         return np.array([[len(text), 1.0] for text in texts])
 
 
@@ -145,10 +147,40 @@ def test_oil_classifier_applies_prefix_and_weights(
     }
     (tmp_path / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
     encoder = FakeEncoder()
-    monkeypatch.setattr("news.classifier.load_encoder", lambda *_: encoder)
+    monkeypatch.setattr("news.classifier.load_encoder", lambda *_, **__: encoder)
 
     scores = OilClassifier(tmp_path).predict(["ab", "abcdefg"])
 
     assert encoder.texts == ["q: ab", "q: abcdefg"]
     # 5 - 5 = 0 -> 0.5; 10 - 5 = 5 -> sigmoid(5)
     assert scores == pytest.approx([0.5, 1 / (1 + np.exp(-5))])
+
+
+def test_oil_classifier_device_batch_size_and_empty_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meta = {
+        "embedder": "fake",
+        "prefix": "",
+        "max_length": 8,
+        "coef": [1.0, -5.0],
+        "intercept": 0.0,
+    }
+    (tmp_path / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    encoder = FakeEncoder()
+    devices = []
+
+    def load(*_, device: str | None = None) -> FakeEncoder:
+        devices.append(device)
+        return encoder
+
+    monkeypatch.setattr("news.classifier.load_encoder", load)
+    model = OilClassifier(tmp_path, device="cuda:0", batch_size=16)
+
+    assert model.predict([]).shape == (0,)
+    model.predict(["oil"])
+    assert devices == ["cuda:0"]
+    assert encoder.batch_size == 16
+    model.predict(["oil"], batch_size=32)
+    assert encoder.batch_size == 32

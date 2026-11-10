@@ -367,6 +367,7 @@ async def run(
     *,
     retry_failed: bool = False,
     newest_first: bool = False,
+    max_articles: int | None = None,
 ) -> None:
     """
     Скачать тексты для индекса `stories_path` в part-файлы.
@@ -379,6 +380,7 @@ async def run(
         - settings: пути, лимиты и таймауты;
         - retry_failed: повторить статьи без текста;
         - newest_first: идти от свежих статей к старым.
+        - max_articles: не больше стольких новых живых страниц за проход.
     """
 
     stories = pd.read_parquet(
@@ -389,6 +391,8 @@ async def run(
     if retry_failed:
         fetched = fetched[fetched["text_source"] != "none"]
     live_todo = stories[~stories["story_id"].isin(fetched["story_id"])]
+    if max_articles is not None:
+        live_todo = live_todo.head(max_articles)
 
     async with httpx.AsyncClient(
         headers={
