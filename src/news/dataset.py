@@ -1,5 +1,9 @@
+import fcntl
 import logging
+import os
 import re
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -9,6 +13,7 @@ from news.settings import NewsSettings
 from news.storage import write_atomic
 
 logger = logging.getLogger(__name__)
+ASSEMBLY_LOCK = Path(tempfile.gettempdir()) / f"oil-news-assembly-{os.getuid()}.lock"
 
 
 def url_date(url: str) -> pd.Timestamp | None:
@@ -103,7 +108,19 @@ def resolve_dates(dataset: pd.DataFrame, settings: NewsSettings) -> pd.DataFrame
     return dataset
 
 
-def assemble(settings: NewsSettings) -> pd.DataFrame:
+def assemble(settings: NewsSettings) -> pd.DataFrame | None:
+    """Собрать снимок, если другой процесс ещё не занял память сборкой."""
+
+    with ASSEMBLY_LOCK.open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            logger.info("Сборка уже идёт в другом процессе; этот снимок пропущен")
+            return None
+        return _assemble(settings)
+
+
+def _assemble(settings: NewsSettings) -> pd.DataFrame:
     """
     Собрать датасет: индекс Media Cloud и тексты статей.
 

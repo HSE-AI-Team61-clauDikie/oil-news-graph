@@ -35,7 +35,7 @@ class NewsSettings(BaseSettings):
     end_date: date = date(2026, 10, 31)
     page_size: int = 1000
 
-    concurrency: int = Field(default=32, description="Одновременных загрузок")
+    concurrency: int = Field(default=64, description="Одновременных загрузок")
     per_host_concurrency: int = Field(
         default=4,
         description="Одновременных загрузок с одного сайта",

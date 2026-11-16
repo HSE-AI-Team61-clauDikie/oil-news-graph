@@ -371,25 +371,21 @@ def assemble_regions(base: NewsSettings, regions: list[Region], period: dict) ->
 
 
 def fulltext_regions(base: NewsSettings, regions: list[Region], period: dict) -> None:
-    """Скачать тексты готовых кандидатов без классификации; собрать датасеты."""
+    """Скачать тексты готовых кандидатов; снимки собирает отдельный этап."""
 
-    assemble_regions(base, regions, period)
     for region in regions:
         settings = region.settings(base).model_copy(update=period)
         if not settings.candidates_path.exists():
             continue
-        logger.info(f"{region.name}: тексты и датасет")
+        logger.info(f"{region.name}: тексты")
         kept = settings.model_copy(update={"stories_path": settings.candidates_path})
-        try:
-            asyncio.run(
-                fulltext.run(
-                    kept,
-                    newest_first=True,
-                    max_articles=base.fulltext_region_limit,
-                ),
-            )
-        finally:
-            assemble_regions(base, [region], period)
+        asyncio.run(
+            fulltext.run(
+                kept,
+                newest_first=True,
+                max_articles=base.fulltext_region_limit,
+            ),
+        )
 
 
 def process_regions(base: NewsSettings, regions: list[Region], period: dict) -> None:
@@ -397,7 +393,10 @@ def process_regions(base: NewsSettings, regions: list[Region], period: dict) -> 
 
     assemble_regions(base, regions, period)
     filter_regions(base, regions, period)
-    fulltext_regions(base, regions, period)
+    try:
+        fulltext_regions(base, regions, period)
+    finally:
+        assemble_regions(base, regions, period)
 
 
 def run_regions(

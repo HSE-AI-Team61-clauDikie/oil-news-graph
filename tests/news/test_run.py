@@ -149,7 +149,7 @@ def test_assemble_stage_uses_saved_texts_without_api_or_encoder(
     assert settings.dataset_path.stat().st_mtime_ns > dataset_stamp
 
 
-def test_fulltext_failure_still_assembles_saved_parts(
+def test_fulltext_failure_leaves_saved_parts_for_separate_assembly(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -168,4 +168,50 @@ def test_fulltext_failure_still_assembles_saved_parts(
     with pytest.raises(RuntimeError, match="connection lost"):
         cli.fulltext_regions(base, [region], {})
 
+    assert not settings.dataset_path.exists()
+    assert (settings.fulltext_dir / "part-00000.parquet").exists()
+    cli.assemble_regions(base, [region], {})
+    assert pd.read_parquet(settings.dataset_path)["story_id"].tolist() == ["a"]
+
+
+def test_fulltext_stage_does_not_run_assembly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    base = NewsSettings(_env_file=None)
+    region = make_region("us")
+    save_candidates(region.settings(base))
+
+    def unexpected(*_, **__) -> None:
+        pytest.fail("the fetch worker must not assemble snapshots")
+
+    async def fetched(kept: NewsSettings, **_) -> None:
+        save_text(kept)
+
+    monkeypatch.setattr(cli, "assemble_regions", unexpected)
+    monkeypatch.setattr(cli.fulltext, "run", fetched)
+    cli.fulltext_regions(base, [region], {})
+    assert not region.settings(base).dataset_path.exists()
+
+
+def test_combined_process_assembles_saved_parts_after_fetch_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    base = NewsSettings(_env_file=None)
+    region = make_region("us")
+    settings = region.settings(base)
+    save_candidates(settings)
+
+    async def interrupted(kept: NewsSettings, **_) -> None:
+        save_text(kept)
+        msg = "connection lost after saving a part"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(cli, "filter_regions", lambda *_, **__: None)
+    monkeypatch.setattr(cli.fulltext, "run", interrupted)
+    with pytest.raises(RuntimeError, match="connection lost"):
+        cli.process_regions(base, [region], {})
     assert pd.read_parquet(settings.dataset_path)["story_id"].tolist() == ["a"]
