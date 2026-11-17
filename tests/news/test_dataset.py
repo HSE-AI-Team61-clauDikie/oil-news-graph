@@ -1,8 +1,10 @@
+import fcntl
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
+from news import dataset as dataset_module
 from news.dataset import assemble, resolve_dates, url_date
 from news.settings import NewsSettings
 
@@ -22,6 +24,23 @@ def settings(tmp_path: Path) -> NewsSettings:
         date_cluster_min=5,
         date_cluster_factor=5,
     )
+
+
+def test_overlapping_assembly_is_skipped_before_reading_inputs(
+    settings: NewsSettings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = tmp_path / "assembly.lock"
+    monkeypatch.setattr(dataset_module, "ASSEMBLY_LOCK", lock, raising=False)
+
+    def unexpected(*_, **__) -> None:
+        pytest.fail("a competing assembler must not load data into memory")
+
+    monkeypatch.setattr(pd, "read_parquet", unexpected)
+    with lock.open("a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert assemble(settings) is None
 
 
 @pytest.mark.parametrize(

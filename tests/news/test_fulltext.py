@@ -1,5 +1,7 @@
+import asyncio
 import ssl
 from collections.abc import Callable
+from dataclasses import asdict
 from datetime import date
 from pathlib import Path
 
@@ -8,7 +10,9 @@ import pandas as pd
 import pytest
 
 from news.fulltext import (
+    Article,
     ArticleFetcher,
+    fetch_in_parts,
     junk_mask,
     needs_wayback,
     read_articles,
@@ -170,6 +174,198 @@ async def test_relative_url_is_skipped(settings: NewsSettings) -> None:
     article = await fetcher.fetch_live("1", "/mersin-haberleri/1")
 
     assert article.error == "адрес без схемы"
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://example.org/news\x01", "https://[broken/", "https://example.org:bad/"],
+)
+async def test_malformed_url_does_not_abort_neighbouring_articles(
+    settings: NewsSettings,
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+) -> None:
+    pd.DataFrame(
+        {
+            "story_id": ["first", "bad", "last"],
+            "url": ["https://example.org/first", url, "https://example.org/last"],
+            "publish_date": pd.to_datetime(["2017-03-28"] * 3),
+        },
+    ).to_parquet(settings.stories_path)
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        return httpx.Response(404)
+
+    patch_client(monkeypatch, handler)
+    settings = settings.model_copy(update={"use_wayback": False})
+    await run(settings)
+    articles = read_articles(settings).set_index("story_id")
+    assert set(articles.index) == {"first", "bad", "last"}
+    assert articles.loc["bad", "text_source"] == "none"
+    assert articles.loc["bad", "error"]
+    assert articles.loc[["first", "last"], "http_status"].eq(404).all()
+    assert len(requests) == 2
+
+    await run(settings)
+    assert len(requests) == 2
+
+
+@pytest.mark.parametrize("retry_failed", [False, True])
+async def test_resume_reads_only_attempt_metadata(
+    settings: NewsSettings,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    retry_failed: bool,
+) -> None:
+    pd.DataFrame(
+        {
+            "story_id": ["existing"],
+            "url": ["https://example.org/existing"],
+            "publish_date": pd.to_datetime(["2017-03-28"]),
+        },
+    ).to_parquet(settings.stories_path)
+    settings.fulltext_dir.mkdir()
+    # Последняя попытка не обязана находиться в файле с большим номером.
+    for number, source, day in [(0, "none", "2026-11-16"), (1, "live", "2026-11-15")]:
+        pd.DataFrame(
+            [asdict(Article("existing", "https://example.org/existing"))],
+        ).assign(text_source=source, fetched_at=pd.Timestamp(day, tz="UTC")).to_parquet(
+            settings.fulltext_dir / f"part-{number:05d}.parquet",
+        )
+    original = pd.read_parquet
+    projections = []
+
+    def read(path: Path, **kwargs) -> pd.DataFrame:
+        if Path(path).parent == settings.fulltext_dir:
+            columns = kwargs.get("columns")
+            assert columns is not None
+            assert "text" not in columns
+            projections.append(set(columns))
+        return original(path, **kwargs)
+
+    requested = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(404)
+
+    patch_client(monkeypatch, handler)
+    monkeypatch.setattr(pd, "read_parquet", read)
+    await run(
+        settings.model_copy(update={"use_wayback": False}),
+        retry_failed=retry_failed,
+    )
+    expected = (
+        {"story_id", "text_source", "fetched_at"} if retry_failed else {"story_id"}
+    )
+    assert projections == [expected, expected]
+    assert len(requested) == int(retry_failed)
+
+
+async def test_slow_request_does_not_block_later_parts(settings: NewsSettings) -> None:
+    settings = settings.model_copy(update={"concurrency": 2})
+    release = asyncio.Event()
+    later_started = asyncio.Event()
+    active = 0
+    peak = 0
+    todo = pd.DataFrame({"story_id": ["slow", "a", "b", "c", "d"]})
+
+    async def fetch(row) -> Article:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        try:
+            if row.story_id == "slow":
+                await release.wait()
+            elif row.story_id == "d":
+                later_started.set()
+            return Article(row.story_id, "https://example.org/", error="HTTP 404")
+        finally:
+            active -= 1
+
+    task = asyncio.create_task(fetch_in_parts(settings, todo, fetch, 2))
+    try:
+        await asyncio.wait_for(later_started.wait(), timeout=1)
+        assert set(read_articles(settings).story_id) == {"a", "b"}
+        assert peak <= 2
+    finally:
+        release.set()
+        await task
+    assert set(read_articles(settings).story_id) == set(todo.story_id)
+    assert len(list(settings.fulltext_dir.glob("part-*.parquet"))) == 3
+
+
+async def test_cancel_saves_completed_results_and_cancels_pending(
+    settings: NewsSettings,
+) -> None:
+    settings = settings.model_copy(update={"concurrency": 2})
+    started = asyncio.Event()
+    blocked = asyncio.Event()
+    todo = pd.DataFrame({"story_id": ["slow", "a", "b", "later"]})
+    cancelled = []
+
+    async def fetch(row) -> Article:
+        if row.story_id in {"slow", "later"}:
+            if row.story_id == "later":
+                started.set()
+            try:
+                await blocked.wait()
+            except asyncio.CancelledError:
+                cancelled.append(row.story_id)
+                raise
+        return Article(row.story_id, "https://example.org/", error="HTTP 404")
+
+    task = asyncio.create_task(fetch_in_parts(settings, todo, fetch, 5))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    # Дать обработчику принять уже завершённые результаты перед отменой.
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert set(read_articles(settings).story_id) == {"a", "b"}
+    assert set(cancelled) == {"slow", "later"}
+
+
+async def test_continuous_fetch_preserves_global_and_host_limits(
+    settings: NewsSettings,
+) -> None:
+    settings = settings.model_copy(update={"concurrency": 3, "per_host_concurrency": 2})
+    active = 0
+    hosts: dict[str, int] = {}
+    peak = 0
+    host_peak = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal active, peak, host_peak
+        host = request.url.host
+        active += 1
+        hosts[host] = hosts.get(host, 0) + 1
+        peak = max(peak, active)
+        host_peak = max(host_peak, hosts[host])
+        await asyncio.sleep(0.001)
+        hosts[host] -= 1
+        active -= 1
+        return httpx.Response(404)
+
+    todo = pd.DataFrame(
+        {
+            "story_id": [str(i) for i in range(12)],
+            "url": [f"https://host{i % 2}.example.org/{i}" for i in range(12)],
+        },
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        fetcher = ArticleFetcher(client, settings)
+        await fetch_in_parts(
+            settings,
+            todo,
+            lambda row: fetcher.fetch_live(row.story_id, row.url),
+            6,
+        )
+    assert peak == settings.concurrency
+    assert host_peak <= settings.per_host_concurrency
+    assert len(read_articles(settings)) == len(todo)
 
 
 async def test_archived_page_comes_from_wayback(settings: NewsSettings) -> None:

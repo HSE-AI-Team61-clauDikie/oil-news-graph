@@ -7,6 +7,7 @@ from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, date, datetime
+from itertools import islice
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -78,8 +79,9 @@ class ArticleFetcher:
             # не должна держать общий слот и тормозить остальные сайты
             async with self.host_limits[urlsplit(url).netloc], self.limit:
                 response = await self.client.get(url)
-        # Обрыв TLS на чтении тела httpx не оборачивает в свою ошибку
-        except (httpx.HTTPError, ssl.SSLError) as error:
+        # InvalidURL не наследуется от HTTPError; urlsplit тоже проверяет URL.
+        # Обрыв TLS на чтении тела httpx не оборачивает в свою ошибку.
+        except (httpx.HTTPError, httpx.InvalidURL, ssl.SSLError, ValueError) as error:
             return Article(story_id, url, error=f"{type(error).__name__}: {error}")
         if response.status_code != httpx.codes.OK:
             return Article(
@@ -248,12 +250,17 @@ class ArticleFetcher:
         return replace(article, text_source=source)
 
 
-def read_articles(settings: NewsSettings) -> pd.DataFrame:
+def read_articles(
+    settings: NewsSettings,
+    *,
+    columns: list[str] | None = None,
+) -> pd.DataFrame:
     """
     Прочитать все part-файлы, по каждой истории - последнюю попытку.
 
     Parameters:
         - settings: каталог part-файлов.
+        - columns: нужные поля; None - прочитать всё, включая текст.
 
     Returns:
         Таблица статей; пустая, если ещё ничего не скачано.
@@ -261,13 +268,18 @@ def read_articles(settings: NewsSettings) -> pd.DataFrame:
 
     paths = sorted(settings.fulltext_dir.glob("part-*.parquet"))
     if not paths:
-        return pd.DataFrame(columns=[column.name for column in fields(Article)])
-    articles = pd.concat([pd.read_parquet(path) for path in paths], ignore_index=True)
-    return (
-        articles.sort_values("fetched_at", kind="stable")
-        .drop_duplicates("story_id", keep="last")
-        .reset_index(drop=True)
+        return pd.DataFrame(
+            columns=columns
+            if columns is not None
+            else [f.name for f in fields(Article)],
+        )
+    articles = pd.concat(
+        [pd.read_parquet(path, columns=columns) for path in paths],
+        ignore_index=True,
     )
+    if "fetched_at" in articles:
+        articles = articles.sort_values("fetched_at", kind="stable")
+    return articles.drop_duplicates("story_id", keep="last").reset_index(drop=True)
 
 
 def junk_mask(articles: pd.DataFrame, repeats: int) -> pd.Series:
@@ -336,30 +348,54 @@ async def fetch_in_parts(
     part_size: int,
 ) -> None:
     """
-    Обработать строки пачками и сохранить каждую пачку в свой part-файл.
+    Непрерывно обрабатывать ограниченную очередь; сохранять готовые результаты.
 
     Parameters:
         - settings: каталог part-файлов;
         - todo: строки к загрузке;
         - fetch: загрузка одной строки из `todo.itertuples()`;
-        - part_size: строк в пачке.
+        - part_size: готовых результатов в part-файле и минимальное окно задач.
     """
 
     settings.fulltext_dir.mkdir(parents=True, exist_ok=True)
     part = len(list(settings.fulltext_dir.glob("part-*.parquet")))
-    for start in range(0, len(todo), part_size):
-        batch = todo.iloc[start : start + part_size]
-        async with asyncio.TaskGroup() as group:
-            tasks = [group.create_task(fetch(row)) for row in batch.itertuples()]
-        articles = pd.DataFrame([asdict(task.result()) for task in tasks])
+    saved = 0
+    completed = []
+
+    def flush() -> None:
+        nonlocal part, saved
+        if not completed:
+            return
+        articles = pd.DataFrame(completed)
         path = settings.fulltext_dir / f"part-{part:05d}.parquet"
         tmp = path.with_suffix(".tmp")
         articles.to_parquet(tmp, index=False)
         tmp.replace(path)
         part += 1
+        saved += len(articles)
+        completed.clear()
         sources = articles["text_source"].value_counts().to_dict()
-        left = len(todo) - start - len(batch)
-        logger.info(f"{path.name}: {sources}, осталось {left}")
+        logger.info(f"{path.name}: {sources}, осталось {len(todo) - saved}")
+
+    rows = iter(todo.itertuples())
+    window = max(part_size, settings.concurrency)
+    try:
+        async with asyncio.TaskGroup() as group:
+            pending = {group.create_task(fetch(row)) for row in islice(rows, window)}
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in done:
+                    completed.append(asdict(task.result()))
+                    if len(completed) == part_size:
+                        flush()
+                pending.update(
+                    group.create_task(fetch(row)) for row in islice(rows, len(done))
+                )
+    finally:
+        flush()
 
 
 async def run(
@@ -387,7 +423,10 @@ async def run(
         settings.stories_path,
         columns=["story_id", "url", "publish_date"],
     ).sort_values("publish_date", ascending=not newest_first, kind="stable")
-    fetched = read_articles(settings)
+    columns = (
+        ["story_id", "text_source", "fetched_at"] if retry_failed else ["story_id"]
+    )
+    fetched = read_articles(settings, columns=columns)
     if retry_failed:
         fetched = fetched[fetched["text_source"] != "none"]
     live_todo = stories[~stories["story_id"].isin(fetched["story_id"])]
