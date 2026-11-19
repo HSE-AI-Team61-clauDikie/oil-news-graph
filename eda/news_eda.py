@@ -1,8 +1,8 @@
-"""Offline audit of the interrupted multilingual news collection.
+"""Автономный разведочный анализ многоязычного новостного корпуса.
 
 Run from the repository root: .venv/bin/python eda/news_eda.py
-Only eda/data/derived/news and eda/reports/news are written. No network or model
-inference is used. Region means the source collection, not the event location.
+Таблицы и графики сохраняются в eda/, основной отчёт — в docs/news_eda.md.
+Для расчёта достаточно локальных файлов. Страна обозначает коллекцию источников.
 """
 
 from __future__ import annotations
@@ -62,6 +62,35 @@ ENTITIES = {
 }
 
 
+TOPIC_NAMES = {
+    "refining": "Переработка",
+    "pipelines": "Трубопроводы",
+    "outages": "Остановки и аварии",
+    "production": "Добыча и производство",
+    "opec": "ОПЕК",
+    "weather": "Погода",
+    "shipping_trade": "Перевозки и торговля",
+    "geopolitics": "Геополитика",
+    "price_commentary": "Цены",
+    "inventory_reporting": "Отчётность о запасах",
+}
+ENTITY_NAMES = {
+    "Cushing": "Cushing",
+    "Permian": "Permian",
+    "Gulf_of_Mexico": "Мексиканский залив",
+    "US_oil_institutions": "EIA, WTI, SPR и др.",
+    "Exxon_Chevron": "Exxon / Chevron",
+    "Aramco_ADNOC": "Aramco / ADNOC",
+    "Pemex_PDVSA": "Pemex / PDVSA",
+}
+FAILURE_NAMES = {
+    "timeout": "Тайм-аут",
+    "network/TLS": "Сеть / TLS",
+    "extraction/short": "Извлечение / короткий текст",
+    "other": "Прочие",
+}
+
+
 def covered_months(path: Path) -> set[str]:
     """Read packed YYYY-MM_YYYY-MM windows, including zero-story months."""
     bounds = path.stem.removeprefix("stories_").split("_")
@@ -99,15 +128,91 @@ def concentration(counts: pd.Series) -> dict[str, float]:
     }
 
 
+def article_metadata(path: Path) -> pd.DataFrame:
+    """Вычислить признаки порциями, освобождая полный текст после каждой порции."""
+    parquet = pq.ParquetFile(path)
+    omitted = {
+        "final_url",
+        "error",
+        "extracted_title",
+        "wayback_timestamp",
+        "http_status",
+    }
+    columns = [name for name in parquet.schema_arrow.names if name not in omitted]
+    parts = []
+    for batch in parquet.iter_batches(batch_size=8192, columns=columns):
+        data = batch.to_pandas()
+        data["chars"] = data.text.str.len().fillna(0).astype(int)
+        data["words"] = data.text.str.count(r"\S+").fillna(0).astype(int)
+        data["excerpt"] = data.text.str.slice(0, 600)
+        data["title_normalized"] = (
+            data.title.fillna("")
+            .str.casefold()
+            .str.replace(r"[^\w]+", " ", regex=True)
+            .str.strip()
+        )
+        data["host"] = data.url.str.extract(
+            r"^https?://(?:www\.)?([^/:]+)", expand=False
+        ).str.casefold()
+        data["date_shift_days"] = (
+            data.date.dt.normalize() - data.publish_date.dt.normalize()
+        ).dt.days
+        data["date_ok"] = data.date.between(START, END) & ~data.date_source.eq(
+            "unreliable"
+        )
+        data["length_ok"] = data.chars.between(300, 100_000)
+        data["quality_ok"] = (
+            data.date_ok
+            & data.length_ok
+            & data.title_normalized.ne("")
+            & data.text_hash.notna()
+        )
+        data["exact_time_present"] = data.date.notna() & data.date.ne(
+            data.date.dt.normalize()
+        )
+        page_date = (
+            pd.to_datetime(data.extracted_date, errors="coerce", utc=True)
+            .dt.tz_localize(None)
+            .dt.normalize()
+        )
+        data["page_date_shift_days"] = (page_date - data.date.dt.normalize()).dt.days
+        for topic, pattern in TOPICS.items():
+            data["topic_" + topic] = data.title.str.contains(
+                pattern, case=False, regex=True, na=False
+            )
+        for entity, pattern in ENTITIES.items():
+            data["entity_" + entity] = data.title.str.contains(
+                pattern, case=False, regex=True, na=False
+            )
+        parts.append(data.drop(columns=["text", "extracted_date"]))
+    return pd.concat(parts, ignore_index=True)
+
+
+def file_record(path: Path) -> dict:
+    stat = path.stat()
+    return {
+        "path": str(path.relative_to(ROOT)),
+        "bytes": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "rows": pq.read_metadata(path).num_rows,
+    }
+
+
 def collect() -> dict[str, pd.DataFrame]:  # noqa: C901 - sequential stage accounting
     """Scan each region separately so the full text corpus never fills RAM."""
     config = tomllib.loads((ROOT / "src/news/regions.toml").read_text())
+    rows, monthly, articles, sources, failures, scores, weeks = ([] for _ in range(7))
+    files = [
+        file_record(p)
+        for p in [
+            u.DATA / "consensus/myfxbook_eia_consensus.parquet",
+            u.DATA / "consensus/trendonify_api_crude_full_history.parquet",
+            u.DATA / "eia/eia_weekly_features.parquet",
+        ]
+    ]
     releases = pd.DatetimeIndex(
         u.release_frame()["release_date"].unique()
     ).sort_values()
-    rows, monthly, articles, sources, failures, scores, weeks, files = (
-        [] for _ in range(8)
-    )
     for region, spec in config["regions"].items():
         raw = ROOT / "data/raw/news" / region
         interim = ROOT / "data/interim/news" / region
@@ -127,16 +232,7 @@ def collect() -> dict[str, pd.DataFrame]:  # noqa: C901 - sequential stage accou
             ]
             if p.exists()
         ]
-        for p in all_paths:
-            st = p.stat()
-            files.append(
-                {
-                    "path": str(p.relative_to(ROOT)),
-                    "bytes": st.st_size,
-                    "mtime_ns": st.st_mtime_ns,
-                    "rows": pq.read_metadata(p).num_rows,
-                }
-            )
+        files.extend(file_record(path) for path in all_paths)
         covered = set().union(*(covered_months(p) for p in paths)) if paths else set()
         scored_paths = sorted((interim / "filtered").glob("stories_*.parquet"))
         scored_months = (
@@ -160,6 +256,7 @@ def collect() -> dict[str, pd.DataFrame]:  # noqa: C901 - sequential stage accou
             "candidates",
             "attempt_rows",
             "attempted",
+            "attempted_candidates",
             "extracted",
             "assembled",
         ]:
@@ -169,7 +266,7 @@ def collect() -> dict[str, pd.DataFrame]:  # noqa: C901 - sequential stage accou
         if (interim / "stories.parquet").exists():
             index = pd.read_parquet(
                 interim / "stories.parquet",
-                columns=["story_id", "publish_date", "media_name", "language"],
+                columns=["publish_date"],
             )
             row["index_rows"] = len(index)
             month = month.join(aggregate_month(index, "publish_date", "indexed"))
@@ -187,7 +284,6 @@ def collect() -> dict[str, pd.DataFrame]:  # noqa: C901 - sequential stage accou
                     "publish_date",
                     "media_name",
                     "language",
-                    "probability",
                 ],
             )
             row["candidates"] = len(candidates)
@@ -293,52 +389,10 @@ def collect() -> dict[str, pd.DataFrame]:  # noqa: C901 - sequential stage accou
                             }
                         )
             del at
-        if processed.exists():
-            data = pd.read_parquet(processed)
+        if processed.exists() and pq.read_metadata(processed).num_rows:
+            data = article_metadata(processed)
             row["assembled"] = len(data)
             data["region"] = region
-            data["chars"] = data.text.str.len().fillna(0).astype(int)
-            data["words"] = data.text.str.count(r"\S+").fillna(0).astype(int)
-            data["excerpt"] = data.text.str.slice(0, 600)
-            data["title_normalized"] = (
-                data.title.fillna("")
-                .str.casefold()
-                .str.replace(r"[^\w]+", " ", regex=True)
-                .str.strip()
-            )
-            data["host"] = data.url.str.extract(
-                r"^https?://(?:www\.)?([^/:]+)", expand=False
-            ).str.casefold()
-            data["date_shift_days"] = (
-                data.date.dt.normalize() - data.publish_date.dt.normalize()
-            ).dt.days
-            data["date_ok"] = data.date.between(START, END) & ~data.date_source.eq(
-                "unreliable"
-            )
-            data["length_ok"] = data.chars.between(300, 100_000)
-            data["quality_ok"] = (
-                data.date_ok
-                & data.length_ok
-                & data.title_normalized.ne("")
-                & data.text_hash.notna()
-            )
-            data["exact_time_present"] = data.date.ne(data.date.dt.normalize())
-            page_date = (
-                pd.to_datetime(data.extracted_date, errors="coerce", utc=True)
-                .dt.tz_localize(None)
-                .dt.normalize()
-            )
-            data["page_date_shift_days"] = (
-                page_date - data.date.dt.normalize()
-            ).dt.days
-            for topic, pattern in TOPICS.items():
-                data["topic_" + topic] = data.title.str.contains(
-                    pattern, case=False, regex=True, na=False
-                )
-            for entity, pattern in ENTITIES.items():
-                data["entity_" + entity] = data.title.str.contains(
-                    pattern, case=False, regex=True, na=False
-                )
             month = month.join(aggregate_month(data, "date", "assembled"))
             weekly["assembled"] = (
                 data[data.date_ok]
@@ -365,18 +419,6 @@ def collect() -> dict[str, pd.DataFrame]:  # noqa: C901 - sequential stage accou
                         "count": count,
                     }
                 )
-            data = data.drop(
-                columns=[
-                    "text",
-                    "final_url",
-                    "error",
-                    "extracted_title",
-                    "extracted_date",
-                    "wayback_timestamp",
-                    "http_status",
-                ],
-                errors="ignore",
-            )
             articles.append(data)
         for column in ["indexed", "candidates", "attempted", "extracted", "assembled"]:
             if column not in month:
@@ -407,6 +449,100 @@ def collect() -> dict[str, pd.DataFrame]:  # noqa: C901 - sequential stage accou
     }
 
 
+def full_weeks(weekly: pd.DataFrame) -> pd.DataFrame:
+    """Полные интервалы [релиз − 7 дней, релиз) внутри периода выгрузки."""
+    end = weekly.release_date
+    return weekly.loc[
+        weekly.window_days.eq(7)
+        & (end - pd.Timedelta(days=7)).ge(START)
+        & (end - pd.Timedelta(days=1)).le(END)
+    ]
+
+
+def count_correlations(weekly: pd.DataFrame) -> pd.DataFrame:
+    """Сравнить страны и учесть каждую различную выборку окон один раз."""
+    rows = []
+    for region, group in (
+        full_weeks(weekly)
+        .dropna(subset=["assembled", "surprise_mmbbl"])
+        .groupby("region")
+    ):
+        any_attempt = group.attempted.gt(0)
+        covered = group.attempt_fraction.ge(0.8)
+        masks = (
+            [("both", covered)]
+            if any_attempt.equals(covered)
+            else [
+                ("any_attempt", any_attempt),
+                ("80pct_attempted", covered),
+            ]
+        )
+        for name, mask in masks:
+            d = group.loc[mask]
+            if (
+                len(d) >= 30
+                and d.assembled.nunique() > 1
+                and d.surprise_mmbbl.nunique() > 1
+            ):
+                rho, p = stats.spearmanr(d.assembled, d.surprise_mmbbl)
+                rows.append(
+                    {"region": region, "screen": name, "n": len(d), "rho": rho, "p": p}
+                )
+    cor = pd.DataFrame(rows, columns=["region", "screen", "n", "rho", "p"])
+    cor["p_bh"] = (
+        stats.false_discovery_control(cor.p, method="bh") if len(cor) else np.nan
+    )
+    return cor
+
+
+def volume_benchmark(weekly: pd.DataFrame) -> pd.DataFrame:
+    """Сравнить базовую модель API и два счётчика новостей на общих датах."""
+    d = (
+        full_weeks(weekly)
+        .groupby("release_date")
+        .agg(
+            attempted=("attempted", "sum"),
+            candidates=("candidates", "sum"),
+            texts=("unique_screened", "sum"),
+            physical=("physical_candidates", "sum"),
+            api=("api_mmbbl", "first"),
+            consensus=("consensus_mmbbl", "first"),
+            target=("surprise_mmbbl", "first"),
+        )
+    )
+    d = (
+        d.loc[d.attempted.eq(d.candidates) & d.candidates.gt(0) & d.texts.gt(0)]
+        .dropna()
+        .copy()
+    )
+    d["api_gap"] = d.api - d.consensus
+    d["log_texts"] = np.log1p(d.texts)
+    d["physical_share"] = d.physical / d.texts
+    train = d.index < pd.Timestamp("2023-01-01")
+    rows = []
+    for name, cols in [
+        ("api", ["api_gap"]),
+        ("api_news", ["api_gap", "log_texts", "physical_share"]),
+    ]:
+        if train.sum() < 4 or train.all():
+            break
+        x = np.column_stack([np.ones(len(d)), d[cols]])
+        beta = np.linalg.lstsq(x[train], d.target[train], rcond=None)[0]
+        residual = d.target[~train] - x[~train] @ beta
+        rows.append(
+            {
+                "model": name,
+                "train_weeks": int(train.sum()),
+                "test_weeks": int((~train).sum()),
+                "mae_mmbbl": residual.abs().mean(),
+                "rmse_mmbbl": np.sqrt(residual.pow(2).mean()),
+            }
+        )
+    return pd.DataFrame(
+        rows, columns=["model", "train_weeks", "test_weeks", "mae_mmbbl", "rmse_mmbbl"]
+    )
+
+
 def summarize(tables: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     """Global duplicate audit, quality screens, and coverage-aware release panels."""
     a = tables["articles"]
@@ -433,9 +569,9 @@ def summarize(tables: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     tables["template_clusters"] = suspicious.sort_values(
         "rows", ascending=False
     ).reset_index()
-    canonical = a[a.quality_ok].sort_values(
-        ["date", "story_id", "region"], kind="stable"
-    )
+    canonical = a.loc[
+        a.quality_ok, ["date", "story_id", "region", "text_hash"]
+    ].sort_values(["date", "story_id", "region"], kind="stable")
     canonical = canonical.drop_duplicates("text_hash")
     a["global_original"] = a.index.isin(canonical.index)
     a["screened"] = a.quality_ok & a.global_original
@@ -494,7 +630,7 @@ def summarize(tables: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
         .reset_index()
     )
     tables["source_year"] = (
-        a[a.date_ok]
+        a.loc[a.date_ok, ["region", "host"]]
         .groupby(["region", a.date.dt.year.rename("year"), "host"])
         .size()
         .rename("rows")
@@ -515,15 +651,15 @@ def summarize(tables: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
         release, on="release_date", how="left", validate="many_to_one"
     )
     count = (
-        a[a.screened]
+        a.loc[a.screened, ["region", "next_release", "candidate_event"]]
         .groupby(["region", "next_release"])
-        .size()
-        .rename("unique_screened")
+        .candidate_event.agg(unique_screened="size", physical_candidates="sum")
     )
     weekly = weekly.merge(
         count, left_on=["region", "release_date"], right_index=True, how="left"
     )
-    weekly["unique_screened"] = weekly.unique_screened.fillna(0).astype(int)
+    count_columns = ["unique_screened", "physical_candidates"]
+    weekly[count_columns] = weekly[count_columns].fillna(0).astype(int)
     weekly["attempt_fraction"] = weekly.attempted / weekly.candidates.replace(0, np.nan)
     weekly["observed_text_count"] = weekly.assembled.astype(float).where(
         weekly.attempted.gt(0)
@@ -557,25 +693,8 @@ def summarize(tables: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
         )
         .reset_index()
     )
-    # Descriptive association only, with multiple-testing control and coverage sensitivity.
-    correlations = []
-    for region, d in weekly.groupby("region"):
-        for name, mask in [
-            ("any_attempt", d.attempted.gt(0)),
-            ("80pct_attempted", d.attempt_fraction.ge(0.8)),
-        ]:
-            use = d.loc[
-                mask & d.window_days.eq(7), ["assembled", "surprise_mmbbl"]
-            ].dropna()
-            if len(use) >= 30 and use.assembled.nunique() > 1:
-                r, p = stats.spearmanr(use.assembled, use.surprise_mmbbl)
-                correlations.append(
-                    {"region": region, "screen": name, "n": len(use), "rho": r, "p": p}
-                )
-    cor = pd.DataFrame(correlations)
-    if not cor.empty:
-        cor["p_bh"] = stats.false_discovery_control(cor.p.to_numpy(), method="bh")
-    tables["count_correlations"] = cor
+    tables["count_correlations"] = count_correlations(weekly)
+    tables["volume_benchmark"] = volume_benchmark(weekly)
     drift = []
     for region, frame in tables["source_year"].groupby("region"):
         mix = frame.pivot_table(
@@ -596,7 +715,10 @@ def summarize(tables: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
             )
     tables["source_drift"] = pd.DataFrame(drift)
     titles = (
-        a[a.title_normalized.ne("")]
+        a.loc[
+            a.title_normalized.ne(""),
+            ["title_normalized", "story_id", "text_hash", "region", "date", "title"],
+        ]
         .groupby("title_normalized")
         .agg(
             rows=("story_id", "size"),
@@ -611,7 +733,16 @@ def summarize(tables: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
         titles[titles.rows.gt(1)].sort_values("rows", ascending=False).reset_index()
     )
     review = []
-    for _region, frame in a.groupby("region"):
+    review_flags = [
+        "region",
+        "probability",
+        "date_ok",
+        "content_warning",
+        "date_disagreement_gt7d",
+        "topic_inventory_reporting",
+        "chars",
+    ]
+    for _region, frame in a[review_flags].groupby("region"):
         for reason, part in [
             ("near_threshold", frame.nsmallest(3, "probability")),
             ("high_score", frame.nlargest(2, "probability")),
@@ -622,7 +753,7 @@ def summarize(tables: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
             ("inventory_screen", frame[frame.topic_inventory_reporting].head(2)),
             ("long_text", frame.nlargest(1, "chars")),
         ]:
-            selected = part.copy()
+            selected = a.loc[part.index].copy()
             selected["review_reason"] = reason
             review.append(selected)
     sample = pd.concat(review).drop_duplicates(["region", "story_id"])
@@ -667,39 +798,43 @@ def make_figures(tables: dict[str, pd.DataFrame]) -> list[tuple[str, str]]:
     r = tables["regions"].set_index("region")
     active = r[r.assembled.gt(0)].sort_values("index_rows", ascending=False)
     x = np.arange(len(active))
-    fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+    fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
     for col, label in [
-        ("index_rows", "Indexed"),
-        ("candidates", "Selected by title model"),
-        ("attempted", "Fetch attempted"),
-        ("assembled", "Assembled text"),
+        ("index_rows", "Индекс"),
+        ("candidates", "Отобрано по заголовку"),
+        ("attempted", "Есть попытка"),
+        ("assembled", "В корпусе"),
     ]:
         axes[0].plot(x, active[col], "o-", ms=3, label=label)
     axes[0].set_yscale("log")
-    axes[0].set_ylabel("Rows (log scale)")
+    axes[0].set_ylabel("Число строк, логарифмическая шкала")
     axes[0].legend(ncol=2)
     for col, label, color in [
-        ("attempted", "Attempted / selected", u.SERIES[0]),
-        ("assembled", "Assembled / selected", u.SERIES[1]),
+        ("attempted", "Попытки / кандидаты", u.SERIES[0]),
+        ("assembled", "Корпус / кандидаты", u.SERIES[1]),
     ]:
         axes[1].plot(x, active[col] / active.candidates, "o-", label=label, color=color)
     axes[1].set_xticks(x, active.index.str.upper(), rotation=45)
-    axes[1].set_ylabel("Fraction of selected stories")
+    axes[1].set_ylabel("Доля отобранных публикаций")
     axes[1].legend()
-    axes[0].set_title("The download stopped at different stages in different countries")
+    axes[0].set_title("Сколько публикаций проходит каждую стадию сбора")
     fig.tight_layout()
     save(
         "01_pipeline",
-        "Pipeline totals use unique attempted story IDs; a failed HTTP request is an attempt, not an article. Index queries differ between recall and full-stream regions.",
+        "Коллекции упорядочены по объёму индекса. При полном обходе кандидатов линии отбора и попыток совпадают. Попытки включают ошибки загрузки.",
     )
 
     m = tables["monthly"].copy()
     ordered = active.index.tolist()
-    fig, axes = plt.subplots(3, 1, figsize=(15, 13), sharex=True, sharey=True)
+    fig, axes = plt.subplots(3, 1, figsize=(15, 19), sharex=True, sharey=True)
     for ax, col, title in zip(
         axes,
         ["indexed", "attempted", "assembled"],
-        ["Indexed stories", "Attempted texts", "Assembled texts"],
+        [
+            "Индекс по дате Media Cloud",
+            "Попытки по дате Media Cloud",
+            "Корпус по итоговой дате публикации",
+        ],
         strict=True,
     ):
         mat = m.pivot(index="region", columns="month", values=col).reindex(ordered)
@@ -707,34 +842,41 @@ def make_figures(tables: dict[str, pd.DataFrame]) -> list[tuple[str, str]]:
             np.log10(mat.to_numpy() + 1),
             aspect="auto",
             interpolation="nearest",
+            vmin=0,
+            vmax=np.log10(
+                1 + m[["indexed", "attempted", "assembled"]].to_numpy().max()
+            ),
             cmap=u.SEQUENTIAL,
         )
         ax.set_yticks(range(len(ordered)), [s.upper() for s in ordered], fontsize=7)
         ax.set_title(title)
-        fig.colorbar(image, ax=ax, fraction=0.018, label="log10(rows + 1)")
+        fig.colorbar(image, ax=ax, fraction=0.018, label="log₁₀(строки + 1)")
     ticks = [i for i, month in enumerate(MONTHS) if month.month == 1]
     axes[-1].set_xticks(ticks, [str(MONTHS[i].year) for i in ticks])
     fig.tight_layout()
     save(
         "02_coverage",
-        "Publication-month counts. Pale cells in the text panels frequently mean work was never attempted. They must not be encoded as zero news flow in a model.",
+        "Одинаковая цветовая шкала для трёх стадий. Светлые ячейки соответствуют месяцам с меньшим числом записей.",
     )
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 7))
+    fig, axes = plt.subplots(1, 2, figsize=(14, 10))
     failures = (
         tables["failures"].groupby("failure")["count"].sum().sort_values().tail(10)
     )
+    failures = failures.rename(index=FAILURE_NAMES)
     failures.plot.barh(ax=axes[0], color=u.SERIES[1])
-    axes[0].set_title("Why the latest fetch failed")
-    axes[0].set_xlabel("Stories")
+    axes[0].set_title("Причины неудачного извлечения")
+    axes[0].set_xlabel("Число публикаций")
     ratio = active.assembled / active.attempted
     ratio.sort_values().plot.barh(ax=axes[1], color=u.SERIES[0])
-    axes[1].set_title("Assembled / attempted by country")
-    axes[1].set_xlabel("Fraction (includes assembly cleaning)")
+    axes[1].set_title("Доля попыток, давших статью")
+    axes[1].set_xlabel("Доля после очистки при сборке")
+    axes[0].set_ylabel("")
+    axes[1].set_ylabel("Коллекция")
     fig.tight_layout()
     save(
         "03_fetch_failures",
-        "Failure categories describe the latest saved attempt per story. The assembled fraction additionally reflects template removal and the timing of the last snapshot.",
+        "Для каждой публикации учтена последняя сохранённая попытка. Доля справа учитывает потери при извлечении и сборке.",
     )
 
     a = tables["articles"]
@@ -743,92 +885,103 @@ def make_figures(tables: dict[str, pd.DataFrame]) -> list[tuple[str, str]]:
     axes[0].bar(hist.index, hist.values, width=0.045, color=u.SERIES[0])
     meta = json.loads((ROOT / "data/models/news/title/meta.json").read_text())
     axes[0].axvline(
-        meta["thresholds"]["keep"], color=u.SERIES[1], label="Saved keep/drop threshold"
+        meta["thresholds"]["keep"], color=u.SERIES[1], label="Порог включения"
     )
-    axes[0].set_title("Scores in all downloaded classifier outputs")
-    axes[0].set_xlabel("Title classifier score (not calibrated event probability)")
+    axes[0].set_title("Распределение оценок заголовков")
+    axes[0].set_xlabel("Оценка классификатора")
     axes[0].legend()
     lang = tables["languages"].set_index("language").rows
     lang.iloc[:20].sort_values().plot.barh(ax=axes[1], color=u.SERIES[2])
-    axes[1].set_title("Languages of assembled articles")
+    axes[1].set_title("20 крупнейших языковых групп")
+    axes[1].set_ylabel("Язык")
     fig.tight_layout()
     save(
         "04_scores_languages",
-        "No local gold labels are present, so current-corpus precision and recall cannot be estimated. Training metrics stored in meta.json are reported separately.",
+        "Слева показаны оценки всех обработанных заголовков, справа — языки готовых статей.",
     )
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 7))
+    fig, axes = plt.subplots(1, 2, figsize=(14, 10))
     active.sort_values("top1_share").top1_share.plot.barh(ax=axes[0], color=u.SERIES[0])
-    axes[0].set_title("Largest host's share of each country corpus")
-    axes[0].set_xlabel("Fraction of assembled rows")
+    axes[0].set_title("Доля крупнейшего хоста внутри коллекции")
+    axes[0].set_xlabel("Доля строк корпуса")
     mat = (
         tables["source_year"].groupby(["year", "host"]).rows.sum().unstack(fill_value=0)
     )
     top = mat.sum().nlargest(8).index
     mix = mat[top].div(mat.sum(axis=1), axis=0)
-    mix["other hosts"] = 1 - mix.sum(axis=1)
+    mix["другие хосты"] = 1 - mix.sum(axis=1)
     mix.plot.area(ax=axes[1], linewidth=0, color=[*u.SERIES, u.NEUTRAL])
-    axes[1].set_title("Observed host mix changes over time")
+    axes[1].set_title("Доли восьми крупнейших хостов по годам")
     axes[1].set_ylim(0, 1)
     axes[1].legend(fontsize=7, loc="upper left")
+    axes[0].set_ylabel("Коллекция")
+    axes[1].set_xlabel("Год")
     fig.tight_layout()
     save(
         "05_sources",
-        "Collection-country and host mix shift with archive coverage and fetch success. Raw article-count growth is not evidence of rising oil-event frequency.",
+        "Состав корпуса по хостам зависит от индекса и доступности архивных страниц. В 2026 году учтены январь–октябрь.",
     )
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 6))
+    fig, axes = plt.subplots(1, 3, figsize=(16, 10))
     axes[0].hist(
         a.chars.clip(lower=1),
         bins=np.geomspace(250, max(a.chars.max(), 301), 65),
         color=u.SERIES[0],
     )
     axes[0].set_xscale("log")
-    axes[0].set_title("Text length in characters")
+    axes[0].set_title("Длина текста в символах")
     axes[0].axvline(300, color=u.SERIES[1])
     dup = active.local_duplicate_rows / active.assembled
     dup.sort_values().plot.barh(ax=axes[1], color=u.SERIES[1])
-    axes[1].set_title("Local exact-duplicate fraction")
+    axes[1].set_title("Доля локальных дублей")
+    axes[1].set_ylabel("Коллекция")
     shift = a.date_shift_days.clip(-365, 365)
     axes[2].hist(shift, bins=60, color=u.SERIES[2])
     axes[2].set_yscale("log")
-    axes[2].set_title("Resolved date minus index date")
-    axes[2].set_xlabel("Days (clipped to ±365)")
+    axes[2].set_title("Итоговая дата минус дата индекса")
+    axes[2].set_xlabel("Дни, значения обрезаны на ±365")
     fig.tight_layout()
     save(
         "06_quality",
-        "Exact duplication uses the pipeline's normalized full-text hash. Repeated text may be syndication, multiple URLs, or extraction artifacts; manual examples distinguish these.",
+        "Локальные дубли определены по хешу нормализованного полного текста. Сдвиг даты рассчитан по каждой собранной строке.",
     )
 
-    fig, ax = plt.subplots(figsize=(14, 8))
+    fig, ax = plt.subplots(figsize=(14, 10))
     topic = tables["topics"].set_index("region").reindex(ordered)
     image = ax.imshow(
         topic.to_numpy(), cmap=u.SEQUENTIAL, aspect="auto", vmin=0, vmax=0.5
     )
     ax.set_yticks(range(len(ordered)), [s.upper() for s in ordered])
-    ax.set_xticks(range(len(TOPICS)), list(TOPICS), rotation=35, ha="right")
-    ax.set_title("Title keyword screens: overlapping themes, not event labels")
-    fig.colorbar(image, ax=ax, label="Share of assembled titles (saturated at 50%)")
+    ax.set_xticks(
+        range(len(TOPICS)), [TOPIC_NAMES[k] for k in TOPICS], rotation=35, ha="right"
+    )
+    ax.set_title("Какие темы встречаются в заголовках")
+    fig.colorbar(image, ax=ax, label="Доля заголовков, верх шкалы 50%")
     fig.tight_layout()
     save(
         "07_topics",
-        "Multilingual title dictionaries are transparent but incomplete and unvalidated. Language differences affect match rates. Inventory-reporting matches require leakage review; price commentary is not a physical event label.",
+        "Темы пересекаются. Доля совпадений зависит в том числе от языка словаря и состава издателей.",
     )
 
-    fig, ax = plt.subplots(figsize=(14, 7))
+    fig, ax = plt.subplots(figsize=(14, 10))
     entity = tables["entities"].set_index("region").reindex(ordered)
     image = ax.imshow(np.log10(entity.to_numpy() + 1), cmap=u.SEQUENTIAL, aspect="auto")
     ax.set_yticks(range(len(ordered)), [s.upper() for s in ordered])
-    ax.set_xticks(range(len(ENTITIES)), list(ENTITIES), rotation=30, ha="right")
-    ax.set_title("Anchors for a future infrastructure graph: title mentions")
-    fig.colorbar(image, ax=ax, label="log10(title matches + 1)")
+    ax.set_xticks(
+        range(len(ENTITIES)),
+        [ENTITY_NAMES[k] for k in ENTITIES],
+        rotation=30,
+        ha="right",
+    )
+    ax.set_title("Упоминания компаний, мест и отраслевых обозначений")
+    fig.colorbar(image, ax=ax, label="log₁₀(совпадения + 1)")
     fig.tight_layout()
     save(
         "08_entities",
-        "A source collection is not an event location. Exact title matches are possible linking anchors; they do not identify a facility, event direction, duration, or lost capacity.",
+        "Число совпадений в заголовках по стране источника. Конкретный объект и место события требуют отдельной проверки.",
     )
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 8), sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 10), sharey=True)
     cov = tables["release_coverage"]
     for ax, cohort in zip(axes, ["train_2015_2022", "test_2023_2026"], strict=True):
         d = cov[cov.cohort.eq(cohort)].set_index("region").reindex(ordered)
@@ -837,47 +990,86 @@ def make_figures(tables: dict[str, pd.DataFrame]) -> list[tuple[str, str]]:
             yy,
             d.weeks_with_text / d.releases,
             color=u.SERIES[0],
-            label="At least one text",
+            label="Есть собранная статья",
         )
         ax.barh(
             yy,
             d.weeks_80pct / d.releases,
             color=u.SERIES[2],
             height=0.35,
-            label="≥80% of selected stories attempted",
+            label="Попытки у ≥80% кандидатов",
         )
         ax.set_yticks(yy, [s.upper() for s in ordered])
         ax.set_xlim(0, 1)
-        ax.set_title(cohort)
-        ax.set_xlabel("Fraction of observed EIA release windows")
+        ax.set_title("2015–2022" if cohort.startswith("train") else "2023–2026")
+        ax.set_xlabel("Доля календарных окон EIA")
         ax.legend(fontsize=8)
     fig.tight_layout()
     save(
         "09_release_coverage",
-        "Articles are assigned to the first observed EIA release strictly after their publication day. Missing release dates and non-seven-day windows are flagged; text retrieval dates do not establish historical availability.",
+        "Публикация отнесена к первому наблюдаемому релизу строго после дня публикации. Знаменатель включает все окна соответствующего периода.",
     )
 
     fig, ax = plt.subplots(figsize=(13, 6))
     q = tables["quality"].set_index("region").reindex(ordered)
     for col, label in [
-        ("assembled", "Assembled"),
-        ("quality_pass", "Valid date, title and length"),
-        ("unique_screened", "Globally unique screened text"),
+        ("assembled", "Собрано"),
+        ("quality_pass", "Прошли проверки качества"),
+        ("unique_screened", "Уникальный проверенный хеш"),
         (
             "physical_candidates",
-            "Physical-theme title screen, excluding inventory reports",
+            "Физические темы без флага отчётности",
         ),
     ]:
         ax.plot(x, q[col], "o-", ms=3, label=label)
     ax.set_yscale("log")
     ax.set_xticks(x, [s.upper() for s in ordered], rotation=45)
-    ax.set_ylabel("Rows (log scale)")
-    ax.set_title("How much text remains after transparent EDA screens")
+    ax.set_ylabel("Число строк, логарифмическая шкала")
+    ax.set_title("Статьи после проверки качества, дедупликации и отбора по теме")
     ax.legend(fontsize=8)
     fig.tight_layout()
     save(
         "10_screening",
-        "Global originals are attributed to the earliest valid dated row, with stable ID/country tie breaks. Retain all provenance links when building the graph. Screened means suitable for inspection, not certified model-ready.",
+        "Один экземпляр текста закрепляется за самой ранней допустимой записью. Последняя линия показывает заголовки для проверки событий.",
+    )
+    cor = tables["count_correlations"].sort_values(["rho", "region"])
+    fig, ax = plt.subplots(figsize=(14, 5))
+    countries = cor.region.drop_duplicates().tolist()
+    x_pos = {name: i for i, name in enumerate(countries)}
+    legend = {
+        "both": ("o", "Оба порога дают одни окна"),
+        "any_attempt": ("x", "Есть попытка"),
+        "80pct_attempted": ("+", "Попытки у ≥80%"),
+    }
+    for screen, rows in cor.groupby("screen"):
+        marker, label = legend[screen]
+        ax.scatter(
+            rows.region.map(x_pos),
+            rows.rho,
+            marker=marker,
+            label=label,
+            color=u.SERIES[0],
+        )
+    passed = cor.loc[cor.p_bh.lt(0.05)]
+    if len(passed):
+        ax.scatter(
+            passed.region.map(x_pos),
+            passed.rho,
+            s=90,
+            facecolors="none",
+            edgecolors=u.SERIES[1],
+            label="p после поправки < 0,05",
+        )
+    ax.axhline(0, color=u.INK_MUTED, linewidth=1)
+    ax.set_xticks(range(len(countries)), [v.upper() for v in countries], rotation=55)
+    ax.set_ylabel("Корреляция Спирмена, ρ")
+    ax.set_title("Число статей за неделю и сюрприз запасов США")
+    if len(cor):
+        ax.legend()
+    fig.tight_layout()
+    save(
+        "11_inventory_surprise",
+        "Каждая точка показывает корреляцию внутри одной коллекции по полным семидневным окнам. Порог значимости учитывает все сравнения.",
     )
     return figs
 
@@ -886,39 +1078,54 @@ def validate_tables(t: dict[str, pd.DataFrame]) -> list[str]:
     """Check accounting and time boundaries against the complete local snapshot."""
     checks = []
     r, a, w = t["regions"], t["articles"], t["weekly"]
+    month = t["monthly"]
     conditions = {
-        "Assembled row totals reconcile across countries and article table": len(a)
-        == r.assembled.sum(),
-        "No duplicate (country, story ID) in assembled snapshots": not a.duplicated(
+        "Число статей совпадает с суммой строк по странам": len(a) == r.assembled.sum(),
+        "Каждая пара страны и story_id встречается в корпусе один раз": not a.duplicated(
             ["region", "story_id"]
         ).any(),
-        "Every country has all 142 audit-month rows": len(t["monthly"])
-        == len(r) * len(MONTHS),
-        "Fetch attempts do not exceed selected stories": r.attempted.le(
+        "Каждая коллекция представлена всеми месяцами периода": (
+            len(month) == len(r) * len(MONTHS)
+            and not month.duplicated(["region", "month"]).any()
+            and month.month.isin(MONTHS).all()
+            and set(month.region) == set(r.region)
+        ),
+        "Сохранённые попытки соответствуют отобранным идентификаторам": r.attempted.eq(
+            r.attempted_candidates
+        ).all(),
+        "Число попыток ограничено числом кандидатов": r.attempted.le(
             r.candidates
         ).all(),
-        "Assembled rows do not exceed uniquely attempted stories": r.assembled.le(
-            r.attempted
+        "Число статей ограничено числом успешных извлечений и попыток": (
+            r.assembled.le(r.extracted) & r.extracted.le(r.attempted)
         ).all(),
-        "Weekly attempted candidates never exceed selected candidates": w.attempted.le(
+        "Неудачные и успешные попытки в сумме дают все попытки": t["failures"][
+            "count"
+        ].sum()
+        + r.extracted.sum()
+        == r.attempted.sum(),
+        "В каждом окне число попыток ограничено числом кандидатов": w.attempted.le(
             w.candidates
         ).all(),
-        "Unattempted weeks retain missing observed text counts": w.loc[
+        "В окнах без попыток число наблюдаемых текстов остаётся пропуском": w.loc[
             w.attempted.eq(0), "observed_text_count"
         ]
         .isna()
         .all(),
-        "Screened texts have valid dates, lengths and titles": a.loc[
+        "Уникальные тексты удовлетворяют фильтрам качества": a.loc[
             a.screened, "quality_ok"
         ].all(),
-        "Screened full-text hashes are globally unique": a.loc[
+        "Хеши отобранных для анализа текстов уникальны": a.loc[
             a.screened, "text_hash"
         ].is_unique,
-        "Release windows strictly exclude the article's publication day": (
+        "День публикации предшествует назначенному релизу": (
             a.loc[a.next_release.notna(), "date"].dt.normalize()
             < a.loc[a.next_release.notna(), "next_release"]
         ).all(),
-        "Stored surprise equals actual minus consensus": np.allclose(
+        "Число словарных кандидатов в окне ограничено числом уникальных текстов": w.physical_candidates.le(
+            w.unique_screened
+        ).all(),
+        "Сюрприз равен первой публикации факта минус консенсус": np.allclose(
             u.release_frame().surprise_mmbbl,
             u.release_frame().actual_mmbbl - u.release_frame().consensus_mmbbl,
         ),
@@ -930,29 +1137,28 @@ def validate_tables(t: dict[str, pd.DataFrame]) -> list[str]:
     return checks
 
 
-def make_report(
-    t: dict[str, pd.DataFrame], figs: list[tuple[str, str]], checks: list[str]
-) -> dict:
-    """Write a self-contained HTML report with measured claims and limitations."""
-    a, r = t["articles"], t["regions"]
-    active = r[r.assembled.gt(0)].copy()
-    meta = json.loads((ROOT / "data/models/news/title/meta.json").read_text())
-    cross = t["duplicate_clusters"].query("regions > 1")
-    text_splits = (
-        a[a.date_ok]
-        .assign(cohort=lambda d: d.date.ge("2023-01-01"))
-        .groupby("text_hash")
-        .cohort.nunique()
-        .gt(1)
+def number(value, digits: int = 0) -> str:
+    """Русская запись числа для отчётов."""
+    return f"{value:,.{digits}f}".replace(",", " ").replace(".", ",")
+
+
+def pct(part, total) -> str:
+    if not total:
+        return "—"
+    rate = 100 * part / total
+    return number(rate, 3 if 0 < rate < 0.05 else 1) + "%"
+
+
+def report_summary(t: dict[str, pd.DataFrame], checks: list[str]) -> dict:
+    a, r, w = t["articles"], t["regions"], t["weekly"]
+    active = r.loc[r.assembled.gt(0)].copy()
+    months = t["monthly"].groupby("region")[["index_downloaded", "index_scored"]].all()
+    by_region = r.set_index("region")
+    completed = months.all(axis=1) & by_region.attempted_candidates.eq(
+        by_region.candidates
     )
-    top_hosts = (
-        a.host.value_counts().head(12).rename_axis("host").reset_index(name="rows")
-    )
-    us = (
-        active.set_index("region").loc["us"]
-        if "us" in active.region.to_numpy()
-        else None
-    )
+    valid_dates = a.loc[a.date_ok, ["text_hash", "date"]]
+    sides = valid_dates.date.ge("2023-01-01").groupby(valid_dates.text_hash).nunique()
     manifest = t["manifest"].sort_values("path")
     digest = hashlib.sha256(manifest.to_json(orient="records").encode()).hexdigest()
     changed = [
@@ -964,31 +1170,47 @@ def make_report(
         or (ROOT / name).stat().st_size != size
         or (ROOT / name).stat().st_mtime_ns != stamp
     ]
-    summary = {
+    if changed:
+        msg = f"Во время EDA изменились входные файлы ({len(changed)}), начиная с {changed[0]}"
+        raise ValueError(msg)
+    cor = t["count_correlations"]
+    return {
         "generated_at_utc": datetime.now(UTC).isoformat(),
         "seed": SEED,
         "scope_start": str(START.date()),
         "scope_end": str(END.date()),
         "configured_regions": len(r),
+        "complete_regions": int(completed.sum()),
         "regions_with_text": len(active),
         "indexed_rows": int(r.index_rows.sum()),
         "candidate_rows": int(r.candidates.sum()),
         "attempted_rows": int(r.attempted.sum()),
+        "matched_candidate_rows": int(r.attempted_candidates.sum()),
+        "extracted_rows": int(r.extracted.sum()),
+        "failed_rows": int(t["failures"]["count"].sum()),
         "assembled_rows": len(a),
+        "quality_rows": int(a.quality_ok.sum()),
         "screened_unique_texts": int(a.screened.sum()),
         "physical_title_candidates": int(a.candidate_event.sum()),
         "languages": int(a.language.nunique()),
         "hosts": int(a.host.nunique()),
         "local_duplicate_rows": int(a.duplicate_of.notna().sum()),
         "all_duplicate_excess": int(len(a) - a.text_hash.nunique()),
-        "cross_region_duplicate_clusters": len(cross),
-        "cross_split_text_clusters": int(text_splits.sum()),
+        "cross_region_duplicate_clusters": int(
+            t["duplicate_clusters"].regions.gt(1).sum()
+        ),
+        "cross_split_text_clusters": int(sides.gt(1).sum()),
         "invalid_date_rows": int((~a.date_ok).sum()),
         "future_date_rows": int(a.date.gt(END).sum()),
         "exact_time_rows": int(a.exact_time_present.sum()),
         "content_warning_rows": int(a.content_warning.sum()),
         "date_disagreement_rows": int(a.date_disagreement_gt7d.sum()),
         "inventory_title_flags": int(a.topic_inventory_reporting.sum()),
+        "review_rows": len(t["review_sample"]),
+        "full_seven_day_windows": full_weeks(w).release_date.nunique(),
+        "country_comparisons": len(cor),
+        "significant_after_bh": int(cor.p_bh.lt(0.05).sum()),
+        "volume_benchmark": t["volume_benchmark"].to_dict("records"),
         "analysis_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "model_sha256": hashlib.sha256(
             (ROOT / "data/models/news/title/meta.json").read_bytes()
@@ -1001,268 +1223,510 @@ def make_report(
         "inputs_changed_during_analysis": changed,
         "checks_passed": checks,
     }
-    (DERIVED / "summary.json").write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False) + "\n"
-    )
-    t["review_sample"].to_csv(DERIVED / "review_sample.csv", index=False)
-    sections = []
 
-    def paragraph(s: str) -> None:
-        sections.append(f"<p>{s}</p>")
 
-    def heading(s: str) -> None:
-        sections.append(f"<h2>{html.escape(s)}</h2>")
+def display_value(v) -> str:
+    if pd.isna(v):
+        return "—"
+    if isinstance(v, (int, np.integer)):
+        return number(v)
+    if isinstance(v, (float, np.floating)):
+        return number(v, 4).rstrip("0").rstrip(",")
+    return str(v)
 
-    def table(frame: pd.DataFrame, limit: int = 50) -> None:
-        sections.append(
-            '<div class="table-wrap">'
-            + frame.head(limit).to_html(
-                index=False,
-                escape=True,
-                border=0,
-                na_rep="—",
-                float_format=lambda x: f"{x:,.3f}",
-            )
-            + "</div>"
-        )
 
-    def figure(index: int) -> None:
-        name, caption = figs[index]
-        encoded = base64.b64encode((REPORT / f"{name}.png").read_bytes()).decode()
-        sections.append(
-            f'<figure><img alt="{html.escape(caption)}" src="data:image/png;base64,{encoded}"><figcaption>{html.escape(caption)}</figcaption></figure>'
-        )
+class NewsReport:
+    """Одна последовательность разделов для Markdown и автономного HTML."""
 
-    paragraph(
-        "Offline exploratory analysis of the interrupted multilingual collection. The original downloader, raw files, classifier outputs and assembled datasets were read without modification. All counts below come from this machine; the older Russian-only notebook and the non-news EDA remain separate."
-    )
-    sections.append(
-        '<div class="metrics">'
-        + "".join(
-            f"<div><strong>{value:,}</strong><span>{label}</span></div>"
-            for value, label in [
-                (len(active), "countries with text"),
-                (int(r.index_rows.sum()), "indexed rows"),
-                (len(a), "assembled articles"),
-                (int(a.screened.sum()), "unique screened texts"),
-                (int(a.language.nunique()), "languages"),
-            ]
-        )
-        + "</div>"
-    )
-    heading("1. Findings that change the research plan")
-    findings = [
-        f"The corpus is substantial but incomplete: {int(r.attempted.sum()):,} of {int(r.candidates.sum()):,} selected rows have a saved fetch attempt ({r.attempted.sum() / r.candidates.sum():.1%}). The missing portion is unobserved collection work, not evidence that no news occurred.",
-        f"Exact repeated text is material: {int(a.duplicate_of.notna().sum()):,} rows are marked as local duplicates; full-corpus hashing finds {len(a) - a.text_hash.nunique():,} redundant rows and {len(cross):,} text clusters spanning multiple source countries. Syndication and overlapping collections can inflate counts and graph centrality.",
-        f"Dates need repair: {int((~a.date_ok).sum()):,} rows have an out-of-range or explicitly unreliable resolved date; {int(a.date.gt(END).sum()):,} fall after the collection end. URL-derived dates are evidence to inspect, not ground truth.",
-        f"All {len(a):,} saved rows contain only publication-day resolution for the EDA cutoff"
-        if not a.exact_time_present.any()
-        else f"Only {int(a.exact_time_present.sum()):,} rows contain non-midnight publication times",
-        f"The saved model uses identical keep and drop thresholds ({meta['thresholds']['keep']:.6f}). This creates a binary filter, with {int(r.borderline.fillna(0).sum()):,} borderline decisions in the saved scores. Its current-corpus precision cannot be verified without local gold labels.",
-        f"The broad title screens flag {int(a.topic_inventory_reporting.sum()):,} possible inventory-reporting stories. These require leakage review before they become predictors; title keyword matches are not validated event labels.",
-    ]
-    if us is not None:
-        findings.insert(
-            1,
-            f"The US index contains {int(us.index_rows):,} rows but only {int(us.assembled):,} assembled articles, dated {us.first_text:%Y-%m-%d}–{us.last_text:%Y-%m-%d}. Its marked duplicate fraction is {us.local_duplicate_rows / us.assembled:.1%}. This snapshot cannot support a 2015–2022 US full-text training set.",
-        )
-    sections.append("<ol>" + "".join(f"<li>{s}</li>" for s in findings) + "</ol>")
-    heading("2. Collection accounting and what remains unfinished")
-    paragraph(
-        "Each country is a Media Cloud source collection. A US-source story can describe Saudi Arabia; a Saudi-source story can discuss US inventories. Four regions use full-stream queries while most use recall terms, so retention rates have different denominators. Packed multi-month filenames are expanded to calendar months; file counts are not month counts. Metadata counts include existing snapshots, even when a stage was interrupted."
-    )
-    account = active[
-        [
-            "region",
-            "mode",
-            "months_downloaded",
-            "index_rows",
-            "candidates",
-            "attempted",
-            "extracted",
-            "assembled",
+    def __init__(self, figs: list[tuple[str, str]]) -> None:
+        self.figs = figs
+        self.title = "Разведочный анализ новостного корпуса"
+        self.md = [
+            f"# {self.title}",
+            (
+                "[Ноутбук](../eda/notebooks/08_news_corpus.ipynb) · [Автономный HTML](../eda/reports/news/news_eda.html) · "
+                "[Сводка JSON](../eda/reports/news/summary.json) · [Расчёты](../eda/news_eda.py) · [EDA неновостных источников](eda.md)"
+            ),
         ]
-    ].copy()
-    account["attempted_selected_pct"] = account.attempted / account.candidates * 100
-    account["assembled_attempted_pct"] = account.assembled / account.attempted * 100
-    table(account.sort_values("index_rows", ascending=False))
-    missing = r[r.index_rows.eq(0)].region.str.upper().tolist()
-    paragraph(
-        "Configured countries without a local merged index: "
-        + html.escape(", ".join(missing))
-        + ". Existing indexed windows are not proof of complete publisher coverage, classifier recall, or a complete Media Cloud archive."
+        self.sections = [f"<h1>{self.title}</h1>"]
+
+    def heading(self, label: str) -> None:
+        self.md.append(f"## {label}")
+        self.sections.append(f"<h2>{html.escape(label)}</h2>")
+
+    def paragraph(self, value: str) -> None:
+        self.md.append(value)
+        self.sections.append(f"<p>{html.escape(value)}</p>")
+
+    def table(self, frame: pd.DataFrame, labels: list[str]) -> None:
+        grid = frame.set_axis(labels, axis=1).map(display_value)
+        lines = [
+            labels,
+            ["---"] * len(labels),
+            *grid.itertuples(index=False, name=None),
+        ]
+        self.md.append(
+            "\n".join(
+                "| "
+                + " | ".join(html.escape(v).replace("|", "&#124;") for v in line)
+                + " |"
+                for line in lines
+            )
+        )
+        self.sections.append(
+            '<div class="table-wrap">' + grid.to_html(index=False, border=0) + "</div>"
+        )
+
+    def figure(self, index: int) -> None:
+        name, caption = self.figs[index]
+        self.md.append(f"![{caption}](../eda/reports/news/{name}.png)")
+        data = base64.b64encode((REPORT / f"{name}.png").read_bytes()).decode()
+        self.sections.append(
+            f'<figure><img alt="{html.escape(caption)}" src="data:image/png;base64,{data}"><figcaption>{html.escape(caption)}</figcaption></figure>'
+        )
+
+    def code(self, value: str) -> None:
+        self.md.append(f"```bash\n{value}\n```")
+        self.sections.append(f"<pre><code>{html.escape(value)}</code></pre>")
+
+
+def make_report(
+    t: dict[str, pd.DataFrame], figs: list[tuple[str, str]], checks: list[str]
+) -> dict:
+    """Записать Markdown и автономный HTML по одним и тем же таблицам и выводам."""
+    a, r, w = t["articles"], t["regions"], t["weekly"]
+    active = r.loc[r.assembled.gt(0)]
+    q = t["quality"]
+    cor = t["count_correlations"]
+    bench = t["volume_benchmark"]
+    failed = (
+        t["failures"].groupby("failure")["count"].sum().sort_values(ascending=False)
     )
-    figure(0)
-    figure(1)
-    heading("3. Fetch failures and selection bias")
-    paragraph(
-        "The failure audit deduplicates retries by story ID and takes the latest fetched_at, matching the downloader's read policy. The extraction count precedes assembly cleaning. Failed attempts and successfully extracted texts excluded as templates are different outcomes. Recent-first processing concentrates partial corpora near the collection end; a successful live fetch in 2026 is also not proof that the recovered text is the original historical version."
+    meta = json.loads((ROOT / "data/models/news/title/meta.json").read_text())
+    summary = report_summary(t, checks)
+    report = NewsReport(figs)
+    indexed, selected, attempted, extracted, assembled = (
+        int(r[k].sum())
+        for k in ["index_rows", "candidates", "attempted", "extracted", "assembled"]
     )
-    table(
-        t["failures"]
-        .groupby("failure")["count"]
-        .sum()
-        .sort_values(ascending=False)
-        .reset_index()
+    clean, unique, events = (
+        summary[k]
+        for k in ["quality_rows", "screened_unique_texts", "physical_title_candidates"]
     )
-    source = (
+    report.paragraph(
+        f"Период публикаций с {START:%d.%m.%Y} по {END:%d.%m.%Y}. Пересчёт от {summary['generated_at_utc'][:10]} UTC охватывает {len(active)} стран с текстами. "
+        f"Объём корпуса — {number(assembled)} строк. Число уникальных текстов после проверок качества — {number(unique)}. Объём выборки для проверки физических событий по заголовкам — {number(events)}."
+    )
+    report.paragraph(
+        "В отчёт от 10 ноября 2026 года входили 460 460 статей из 31 коллекции. Проверяем, какие архивы удалось восстановить и связан ли недельный объём публикаций с сюрпризом запасов США. "
+        f"При уровне 5% после поправки на множественные сравнения статистически значимых результатов — {summary['significant_after_bh']} из {summary['country_comparisons']}."
+    )
+
+    report.heading("1. Источники и учёт стадий сбора")
+    report.paragraph(
+        f"Для {summary['complete_regions']} из {len(r)} настроенных коллекций есть индекс и результаты фильтра по заголовку за все {len(MONTHS)} месяца, а у каждого текущего кандидата найдена сохранённая попытка по story_id. "
+        "Один материал может входить в несколько коллекций. До глобальной дедупликации строки суммируются по странам."
+    )
+    report.table(
+        pd.DataFrame(
+            [
+                ("Индекс Media Cloud", indexed),
+                ("Отобрано классификатором заголовков", selected),
+                ("Кандидаты с сохранённой попыткой", attempted),
+                ("Успешно извлечён текст", extracted),
+                ("Строки собранного корпуса", assembled),
+                ("Прошли проверки качества", clean),
+                ("Уникальные тексты после проверок", unique),
+            ]
+        ),
+        ["Стадия", "Число записей"],
+    )
+    report.paragraph(
+        f"Попытки охватили {pct(attempted, selected)} кандидатов. До итоговой статьи дошли {pct(assembled, attempted)} попыток. "
+        f"На извлечении потеряно {number(failed.sum())} публикаций, ещё {number(extracted - assembled)} успешно извлечённых записей отсеяны при сборке."
+    )
+    report.figure(0)
+
+    report.heading("2. Географическое и временное покрытие")
+    report.paragraph(
+        "Код страны обозначает коллекцию издателей. Ирак, Оман, Сирия и Йемен собирались целиком в пределах выбранных коллекций Media Cloud. Для остальных стран индекс ограничивал предварительный поиск по тематическим терминам. Поэтому доля отобранных заголовков зависит и от способа сбора."
+    )
+    by_country = r.sort_values("index_rows", ascending=False).copy()
+    by_country["yield"] = [
+        pct(n, d)
+        for n, d in zip(by_country.assembled, by_country.attempted, strict=True)
+    ]
+    report.table(
+        by_country[
+            ["region", "index_rows", "candidates", "attempted", "assembled", "yield"]
+        ],
+        ["Страна", "Индекс", "Кандидаты", "Попытки", "Статьи", "Статьи / попытки"],
+    )
+    m = t["monthly"]
+    populated = m.loc[m.assembled.gt(0)].groupby("region").month.nunique()
+    report.paragraph(
+        f"Хотя бы одна статья найдена во всех {len(MONTHS)} месяцах для {int(populated.eq(len(MONTHS)).sum())} коллекций. "
+        f"Из {number(len(m))} пар «страна–месяц» статьи есть в {number(m.assembled.gt(0).sum())}. "
+        "Помесячный индекс основан на дате Media Cloud, корпус — на итоговой дате статьи. Границы покрытия учитывают и пустые месяцы внутри многомесячных файлов."
+    )
+    era = pd.cut(
+        m.month.dt.year,
+        bins=[2014, 2018, 2022, 2025, 2026],
+        labels=["2015–2018", "2019–2022", "2023–2025", "2026, январь–октябрь"],
+    )
+    by_era = (
+        m.groupby(era, observed=True)[["attempted", "extracted"]].sum().reset_index()
+    )
+    by_era["yield"] = [
+        pct(n, d) for n, d in zip(by_era.extracted, by_era.attempted, strict=True)
+    ]
+    report.paragraph(
+        "Как часто архивная ссылка даёт текст, видно при группировке по исходной дате публикации. Обе величины ниже относятся к одной и той же когорте кандидатов. Вместе с возрастом ссылок меняется состав издателей, поэтому таблица сама по себе не устанавливает причину различий."
+    )
+    report.table(
+        by_era, ["Годы публикации", "Попытки", "Извлечены тексты", "Успех извлечения"]
+    )
+    report.figure(1)
+
+    report.heading("3. Ошибки загрузки и смещение выборки")
+    report.paragraph(
+        "При повторной загрузке берём последний результат по времени fetched_at внутри страны. HTTP 200 в таблице ошибок означает, что сервер ответил, но извлечь пригодный текст не удалось. HTTP-статус и причина обработки учитываются для одной и той же последней попытки."
+    )
+    f = (
+        failed.rename(index=FAILURE_NAMES)
+        .head(10)
+        .rename_axis("reason")
+        .reset_index(name="n")
+    )
+    f["share"] = [pct(v, failed.sum()) for v in f.n]
+    report.table(f, ["Причина", "Неудачные попытки", "Доля всех неудач"])
+    sources = (
         t["sources"]
         .groupby(["region", "source", "stage"])["count"]
         .sum()
         .unstack(fill_value=0)
         .reset_index()
     )
-    for col in ["candidate", "attempted", "assembled"]:
-        if col not in source:
-            source[col] = 0
-    source["attempt_fraction"] = source.attempted / source.candidate.replace(0, np.nan)
-    source["assembled_fraction"] = source.assembled / source.attempted.replace(
-        0, np.nan
+    sources["yield"] = [
+        pct(n, d) for n, d in zip(sources.assembled, sources.attempted, strict=True)
+    ]
+    report.paragraph(
+        "Результаты десяти крупнейших издателей по числу кандидатов показывают, как различается восстановление текстов внутри коллекций. Сравнение долей учитывает дополнительную очистку после извлечения."
     )
-    paragraph(
-        "Largest selected publisher strata, with both selection and recovery denominators:"
+    report.table(
+        sources.nlargest(10, "candidate")[
+            ["region", "source", "candidate", "attempted", "assembled", "yield"]
+        ],
+        [
+            "Коллекция",
+            "Издатель Media Cloud",
+            "Кандидаты",
+            "Попытки",
+            "Статьи",
+            "Статьи / попытки",
+        ],
     )
-    table(source.sort_values("candidate", ascending=False), 20)
-    figure(2)
-    heading("4. Classifier scores, languages and representativeness")
-    paragraph(
-        f"The saved multilingual-e5-base title model was trained on {meta['trained_on']:,} examples. Its metadata reports PR-AUC {meta['metrics']['pr_auc']:.3f}, language-macro PR-AUC {meta['metrics']['pr_auc_macro_language']:.3f}, stratum-weighted PR-AUC {meta['metrics']['pr_auc_weighted']:.3f}, and temporal PR-AUC {meta['metrics']['pr_auc_temporal']:.3f}. The gap between unweighted and weighted metrics matters. These are historical model-development metrics, not a new validation of this corpus. Score thresholds should not be interpreted as calibrated event probabilities. No encoder or paid labeler was run for this EDA."
+    if "sy" in set(active.region):
+        sy = active.set_index("region").loc["sy"]
+        report.paragraph(
+            f"У Сирии в корпус вошли {number(sy.assembled)} из {number(sy.attempted)} обработанных кандидатов ({pct(sy.assembled, sy.attempted)}). "
+            "Низкое число текстов в такой коллекции особенно чувствительно к доступности сайтов."
+        )
+    report.figure(2)
+
+    report.heading("4. Языки и фильтр релевантности")
+    lang = t["languages"].head(12).copy()
+    lang["share"] = [pct(v, assembled) for v in lang.rows]
+    report.paragraph(
+        f"В корпусе {summary['languages']} языков. Таблица показывает двенадцать крупнейших групп. Один язык может встречаться в нескольких коллекциях."
     )
-    table(t["languages"])
-    figure(3)
-    heading("5. Sources, concentration and temporal drift")
-    paragraph(
-        "Source balance matters twice: the index has changing archive coverage, and the attempted subset has a changing recovery mix. Effective source count is 1 / sum(host_share²). Adjacent-year total variation measures how much publisher weight changes; it can reflect collection artifacts, not changes in world events. The 2026 slice ends in October, so annual totals are not like-for-like."
+    report.table(
+        lang[["language", "rows", "share", "regions", "median_chars"]],
+        ["Язык", "Статьи", "Доля", "Коллекции", "Медиана длины, символов"],
     )
-    table(
-        active[
-            ["region", "sources", "top1_share", "top5_share", "effective_sources"]
-        ].sort_values("top1_share", ascending=False)
+    met = meta["metrics"]
+    report.paragraph(
+        f"Классификатор {meta['embedder']} обучен на {number(meta['trained_on'])} примерах. Пороги keep и drop равны {number(meta['thresholds']['keep'], 6)} и {number(meta['thresholds']['drop'], 6)}. "
+        f"Пограничных решений в сохранённых оценках — {number(r.borderline.fillna(0).sum())}. "
+        f"При разработке PR-AUC составила {number(met['pr_auc'], 3)}, в среднем по языкам — {number(met['pr_auc_macro_language'], 3)}, с весами страт — {number(met['pr_auc_weighted'], 3)}, на временной проверке — {number(met['pr_auc_temporal'], 3)}. Для оценки точности на текущем корпусе нужна независимая разметка."
     )
-    table(top_hosts)
-    paragraph(
-        "Largest adjacent-year source-mix shifts with at least 100 articles in both years:"
+    report.figure(3)
+
+    report.heading("5. Концентрация источников и дрейф")
+    report.paragraph(
+        f"В адресах статей обнаружено {number(summary['hosts'])} хостов. Эффективное число источников равно 1 / Σ доля². Пять наиболее концентрированных коллекций и коллекция США показывают диапазон этого показателя."
     )
-    table(
+    conc = (
+        pd.concat([active.nlargest(5, "top1_share"), active[active.region.eq("us")]])
+        .drop_duplicates("region")
+        .copy()
+    )
+    for col in ["top1_share", "top5_share"]:
+        conc[col] = [pct(v, 1) for v in conc[col]]
+    report.table(
+        conc[["region", "sources", "top1_share", "top5_share", "effective_sources"]],
+        ["Коллекция", "Хосты", "Доля лидера", "Доля пяти лидеров", "Эффективное число"],
+    )
+    drift = (
         t["source_drift"]
-        .query("rows_before >= 100 and rows_after >= 100")
-        .sort_values("total_variation", ascending=False),
-        12,
+        .query(
+            "rows_before >= 100 and rows_after >= 100 and year_after == year_before + 1"
+        )
+        .nlargest(3, "total_variation")
     )
-    figure(4)
-    heading("6. Text quality, exact repeats and date errors")
-    paragraph(
-        f"Character counts are language-neutral diagnostics; whitespace word counts are not comparable across all scripts. The basic screen requires a nonempty title, a normalized text hash, 300–100,000 characters, a resolved date within {START:%Y-%m-%d}–{END:%Y-%m-%d}, and date_source other than unreliable. It leaves {int(a.quality_ok.sum()):,} rows before global text deduplication. These thresholds are transparent EDA choices, not learned quality labels."
+    report.paragraph(
+        "Наибольшие изменения состава издателей между соседними годами приведены для пар с ≥100 статьями в каждом году. Полная вариация равна половине суммы абсолютных изменений долей хостов. При полном совпадении распределений она равна нулю, при отсутствии общих хостов — единице. 2026 год заканчивается октябрём."
     )
-    paragraph(
-        f"Content screens flag {int(a.content_warning.sum()):,} rows: recognizable consent/access messages in the first 600 characters, or one text used at least ten times under at least five distinct titles over more than 30 days. These rows are excluded from the inspection-ready screen, pending manual review. A concrete case is the iDNES advertising-consent text surviving on many subdomains: per-host template removal misses a template spread across subdomains. The largest US clusters, in contrast, show wire-service syndication across dozens of stations."
+    report.table(
+        drift[["region", "year_before", "year_after", "total_variation"]].assign(
+            year_before=drift.year_before.astype(str),
+            year_after=drift.year_after.astype(str),
+        ),
+        ["Коллекция", "Первый год", "Второй год", "Полная вариация"],
     )
-    table(t["template_clusters"], 10)
-    paragraph(
-        f"Resolved and index dates disagree by more than seven days in {int(a.date_disagreement_gt7d.sum()):,} rows. Some are legitimate corrections, so this disagreement is retained as a review flag rather than automatically rejected. Out-of-range checks alone miss plausible-looking wrong years. Numeric story IDs and timestamp suffixes can accidentally match the current URL date regex."
+    report.figure(4)
+
+    report.heading("6. Качество текстов, дубли и даты")
+    report.paragraph(
+        "Проверка требует непустого нормализованного заголовка, хеша текста, длины 300–100 000 символов и даты в пределах периода с источником, отличным от unreliable. Предупреждение о содержимом срабатывает на известную заглушку в первых 600 символах или на текст с ≥10 копиями, ≥5 разными заголовками и размахом дат более 30 дней."
     )
-    table(
-        a.groupby("language")
-        .chars.quantile([0.1, 0.5, 0.9, 0.99])
-        .unstack()
-        .rename(
-            columns={
-                0.1: "p10_chars",
-                0.5: "p50_chars",
-                0.9: "p90_chars",
-                0.99: "p99_chars",
+    report.table(
+        pd.DataFrame(
+            [
+                (
+                    "Ненадёжная дата или дата за пределами периода",
+                    summary["invalid_date_rows"],
+                ),
+                ("В том числе после конца периода", summary["future_date_rows"]),
+                ("Длина свыше 100 000 символов", q.very_long.sum()),
+                ("Предупреждение о содержимом", summary["content_warning_rows"]),
+                (
+                    "Итоговая и индексная даты расходятся более чем на неделю",
+                    summary["date_disagreement_rows"],
+                ),
+                ("Ненулевое время суток в итоговой дате", summary["exact_time_rows"]),
+                (
+                    "Помечено локальных дублей в коллекциях",
+                    summary["local_duplicate_rows"],
+                ),
+                (
+                    "Избыточные строки по хешу во всём корпусе",
+                    summary["all_duplicate_excess"],
+                ),
+                (
+                    "Кластеры с текстом в нескольких коллекциях",
+                    summary["cross_region_duplicate_clusters"],
+                ),
+                (
+                    "Кластеры с допустимыми датами по обе стороны границы 2023 года",
+                    summary["cross_split_text_clusters"],
+                ),
+            ]
+        ),
+        ["Проверка", "Строк или кластеров"],
+    )
+    report.paragraph(
+        f"Если оставить один экземпляр каждого хеша до фильтра качества, число строк сократится на {pct(summary['all_duplicate_excess'], assembled)}. "
+        "Для графа можно хранить один узел документа и связи со всеми URL, издателями и коллекциями. Это сохраняет историю перепечаток и ограничивает повторный учёт одного сообщения."
+    )
+    report.table(
+        a.date_source.value_counts().rename_axis("источник").reset_index(name="строк"),
+        ["Источник итоговой даты", "Строки"],
+    )
+    report.paragraph(
+        "Расхождение с датой индекса может быть обоснованным исправлением. В таблице ниже приведены наибольшие абсолютные сдвиги среди дат, восстановленных из URL. Числовой идентификатор или часть времени в адресе могут выглядеть как год, месяц и день. Эти случаи нужно сверять с исходной страницей."
+    )
+    shifts = a.loc[
+        a.date_source.eq("url") & a.date_disagreement_gt7d,
+        ["region", "host", "date", "publish_date", "date_shift_days"],
+    ].copy()
+    shifts = shifts.loc[shifts.date_shift_days.abs().nlargest(3).index]
+    for col in ["date", "publish_date"]:
+        shifts[col] = shifts[col].dt.strftime("%Y-%m-%d")
+    report.table(
+        shifts, ["Коллекция", "Хост", "Дата из URL", "Дата индекса", "Сдвиг, дни"]
+    )
+    report.figure(5)
+
+    report.heading("7. Темы, кандидаты событий и сущности")
+    topic_cols = ["topic_" + k for k in TOPICS]
+    counts = (
+        a[topic_cols]
+        .sum()
+        .set_axis([TOPIC_NAMES[k] for k in TOPICS])
+        .sort_values(ascending=False)
+    )
+    report.table(counts.reset_index(), ["Тема по заголовку", "Строки с совпадением"])
+    report.paragraph(
+        f"Тематические группы пересекаются. Среди уникальных текстов, прошедших проверки, у {number(events)} ({pct(events, unique)}) есть совпадение по добыче, переработке, перевозкам, трубопроводам, остановкам или погоде без совпадения по отчётности о запасах. "
+        f"Из всех строк корпуса флаг отчётности получили {number(summary['inventory_title_flags'])}. Это кандидаты для проверки утечки уже опубликованных данных EIA или API."
+    )
+    report.paragraph(
+        "Термины отражают язык словаря. Например, правила включают английские и арабские основы, а для китайского отсутствуют иероглифические варианты. Совпадения по странам нельзя напрямую переводить в частоту физических событий."
+    )
+    report.figure(6)
+    entities = (
+        t["entities"][["entity_" + k for k in ENTITIES]]
+        .sum()
+        .set_axis([ENTITY_NAMES[k] for k in ENTITIES])
+        .sort_values(ascending=False)
+    )
+    report.table(
+        entities.reset_index(),
+        ["Группа компаний, мест или обозначений", "Заголовки с совпадением"],
+    )
+    report.paragraph(
+        "Для связи упоминания с инфраструктурой нужны идентификатор объекта, место и время события, направление воздействия, мощность с единицами и длительность. Одно название компании может относиться к разным объектам."
+    )
+    report.figure(7)
+    report.figure(9)
+
+    report.heading("8. Привязка к релизам EIA")
+    calendar = w.drop_duplicates("release_date").sort_values("release_date")
+    report.paragraph(
+        f"В календаре {len(calendar)} наблюдаемых релизов. Публикация относится к первому релизу строго после дня её публикации. Все статьи дня релиза переходят в следующее окно. "
+        "При точности даты до дня время доступности статьи относительно публикации EIA внутри суток неизвестно. Календарь наследует пропуски 2022 и 2023 годов и задержку релиза в июне 2022 года."
+    )
+    cov = t["release_coverage"].copy()
+    cov["cohort"] = cov.cohort.map(
+        {"train_2015_2022": "2015–2022", "test_2023_2026": "2023–2026"}
+    )
+    example_countries = ["us", "de", "in", "fr", "sy", "cn"]
+    sample_cov = pd.concat(
+        [cov.loc[cov.region.eq(c)].sort_values("cohort") for c in example_countries]
+    )
+    report.table(
+        sample_cov[
+            [
+                "region",
+                "cohort",
+                "releases",
+                "weeks_with_text",
+                "weeks_80pct",
+                "articles",
+            ]
+        ],
+        [
+            "Коллекция",
+            "Период",
+            "Релизы",
+            "Окна со статьями",
+            "Окна с ≥80% попыток",
+            "Статьи в окнах",
+        ],
+    )
+    us_train = cov.loc[cov.region.eq("us") & cov.cohort.eq("2015–2022")]
+    if not us_train.empty:
+        row = us_train.iloc[0]
+        report.paragraph(
+            f"В первом отчёте в американской коллекции не было текстов для обучения до 2023 года. Теперь статьи есть в {int(row.weeks_with_text)} из {int(row.releases)} таких окон. "
+            "Это позволяет проверить модель на более поздних релизах, сохраняя хронологию."
+        )
+    report.paragraph(
+        "Для статистики оставляем только полные семидневные интервалы [предыдущий релиз, текущий релиз) внутри периода сбора. "
+        f"Из {int(calendar.window_days.eq(7).sum())} семидневных окон осталось {summary['full_seven_day_windows']}. "
+        f"Архив заканчивается {END:%d.%m.%Y}, а последний календарный релиз приходится на {calendar.release_date.max():%d.%m.%Y}. "
+        "Первое окно не имеет известной левой границы. При отсутствии попыток наблюдаемое число текстов остаётся пропуском."
+    )
+    report.figure(8)
+
+    report.heading("9. Количество новостей и сюрприз запасов")
+    report.paragraph(
+        "Сюрприз запасов равен первой публикации изменения коммерческих запасов нефти США минус консенсус, в млн баррелей. "
+        "В каждой коллекции проверяем ранговую корреляцию Спирмена с числом собранных статей на полных семидневных окнах. Требуются ≥30 наблюдений. "
+        "Сравниваем окна с любой попыткой и с попытками у ≥80% кандидатов. Совпадающие наборы дат учитываются один раз при поправке Бенджамини–Хохберга."
+    )
+    if len(cor):
+        report.paragraph(
+            f""
+            f"Диапазон ρ от {number(cor.rho.min(), 3)} до {number(cor.rho.max(), 3)}, минимальное скорректированное p = {number(cor.p_bh.min(), 4)}. "
+            "Таблица показывает пять сравнений с наименьшими исходными p."
+        )
+        results = cor.nsmallest(5, "p").copy()
+        results["screen"] = results.screen.map(
+            {
+                "both": "оба порога",
+                "any_attempt": "есть попытка",
+                "80pct_attempted": "≥80% попыток",
             }
         )
-        .reset_index()
-    )
-    paragraph(
-        f"{int(text_splits.sum()):,} exact-text clusters occur on both sides of the 2023 split. Group duplicates before train/test evaluation; the same content must not enter both folds. Identical titles are a separate signal and can describe recurring updates, so they are not automatically removed."
-    )
-    table(t["duplicate_clusters"].head(12))
-    top_hashes = t["duplicate_clusters"].text_hash.head(4)
-    paragraph(
-        "Examples from the largest repeated-text clusters (first 180 characters of extracted text):"
-    )
-    examples = a[a.text_hash.isin(top_hashes)].groupby("text_hash", sort=False).head(2)
-    examples = examples[["region", "date", "host", "title", "excerpt"]].copy()
-    examples["excerpt"] = examples.excerpt.str.slice(0, 180)
-    table(examples)
-    paragraph(
-        "Out-of-range date examples; compare the title, URL-derived date and original index date before repairing:"
-    )
-    table(
-        a[~a.date_ok][
-            ["region", "date", "publish_date", "date_source", "title", "url"]
-        ].sort_values("date", ascending=False),
-        12,
-    )
-    table(
-        a.date_source.value_counts().rename_axis("date_source").reset_index(name="rows")
-    )
-    figure(5)
-    heading("7. Physical themes, direct inventory reports and graph anchors")
-    paragraph(
-        "The title dictionaries cover several observed languages and allow overlap. They are useful for finding review examples, not comparing countries' true event prevalence. Matched production, refining, pipeline, outage, weather and shipping themes suggest event candidates. Generic price commentary and reporting of the EIA/API result should be reviewed separately. The event screen excludes inventory-reporting matches but has neither measured precision nor measured recall."
-    )
-    figure(6)
-    paragraph(
-        "Company and location title mentions provide initial linking candidates. Building the graph still requires entity disambiguation, facility IDs, event time, source publication time, capacity units, direction and duration. Missing a title keyword is not evidence that an article lacks a relevant entity in its body."
-    )
-    figure(7)
-    table(t["quality"])
-    figure(9)
-    heading("8. EIA release alignment and historical feasibility")
-    paragraph(
-        "For exploratory alignment only, an article is assigned to the first observed Myfxbook EIA release strictly after its normalized publication day. This excludes all same-day stories because intraday availability cannot be established. The first window has no known start; missing calendar releases create longer windows. Windows other than seven days are flagged and excluded from the descriptive correlation screen. This is conservative by publication date but does not certify that the text, extraction version, or corrected timestamp was known at the historical cutoff."
-    )
-    paragraph(
-        "The target calendar inherits the existing Myfxbook caveats: missing weeks in 2022 and 2023, and an ambiguous delayed publication in June 2022. No missing releases or consensus values were fabricated. The target and API estimates are used as outcomes/context, not features extracted from the article text."
-    )
-    figure(8)
-    table(t["release_coverage"].query("weeks_with_text > 0"))
-    paragraph(
-        "The weekly panel retains indexed, selected, attempted and assembled counts. observed_text_count is missing when no texts were attempted. An attempted fraction of at least 80% is a coverage sensitivity screen, not a claim of completeness. Even fully attempted selections remain conditioned on the query, classifier and fetch success."
-    )
-    paragraph(
-        "Pipeline throughput is grouped by the original index publication date; assembled content is grouped by the resolved publication date. Corrections can move stories between windows, so stage ratios are diagnostics rather than exact same-window recovery probabilities. Large date disagreements should be reviewed before modeling."
-    )
-    heading("9. News counts versus inventory surprise: descriptive screen")
-    paragraph(
-        "Spearman correlations below use assembled counts in seven-day windows with at least 30 observations, once for all attempted windows and once for windows with at least 80% of selected stories attempted. Benjamini–Hochberg p-values adjust across the complete displayed family. Counts still reflect archive and recovery bias, duplicates and source mix. This is an exploratory association, not a predictive test or evidence of incremental value over API. The reviewed non-news baseline already shows that API minus consensus is a strong comparator."
-    )
-    cor = t["count_correlations"]
-    if not cor.empty:
-        paragraph(
-            f"Measured result: {int(cor.p_bh.lt(0.05).sum())} of {len(cor)} country/coverage comparisons pass a 5% false-discovery threshold. This screen provides no convincing evidence that raw publication counts predict the inventory surprise."
+        report.table(
+            results[["region", "screen", "n", "rho", "p", "p_bh"]],
+            ["Коллекция", "Окна", "N", "ρ", "p", "p после поправки"],
         )
-    table(cor.sort_values("p_bh") if not cor.empty else cor, 100)
-    heading("10. Concrete next steps for the graph dataset")
-    sections.append(
-        "<ol><li>Repair the date resolver against the anomalies above, retaining original and corrected fields plus the reason. Reassemble only after testing those cases.</li><li>Use the stage and monthly tables to backfill missing historical texts, prioritizing US training years and publisher strata with large remaining selected counts. Do not treat partial months as zero events.</li><li>Annotate the stratified review sample for oil relevance, physical event type, text quality and date validity. It is enriched for difficult cases and is not a probability sample for estimating corpus-wide precision.</li><li>Collapse exact text into one document node, keep publisher/URL/country provenance as edges, and split duplicate groups together during evaluation. Review repeated-title variants before adding near-duplicate clustering.</li><li>Extract event location independently of source country. Link facilities and companies to the infrastructure tables with explicit confidence and unresolved cases.</li><li>Fix a prediction timestamp and collect genuine publication/availability evidence. Validate incremental performance over consensus, API and pre-release fundamentals with temporal evaluation after coverage and leakage audits pass.</li></ol>"
+    report.figure(10)
+    report.paragraph(
+        "Для отдельной проверки на будущих релизах обучаем методом наименьших квадратов две линейные модели со свободным членом. Первая использует разность API и консенсуса. Вторая добавляет log(1 + число уникальных текстов) и долю этих текстов с физической темой. "
+        "Счётчики суммируются по коллекциям после глобальной дедупликации. В обеих моделях одинаковые недели со всеми попытками по отобранным кандидатам, хотя бы одним уникальным текстом и известными API, консенсусом и фактом."
     )
-    paragraph(
-        f"Manual review file: <code>eda/data/derived/news/review_sample.csv</code>, {len(t['review_sample']):,} rows. Human label fields are deliberately blank. The compact article audit includes excerpts and flags; the original full texts remain in the source datasets."
+    if not bench.empty:
+        models = bench.copy()
+        models["model"] = models.model.map(
+            {"api": "API − консенсус", "api_news": "API − консенсус и новости"}
+        )
+        report.table(
+            models,
+            [
+                "Модель",
+                "Недель до 2023",
+                "Недель с 2023",
+                "MAE, млн барр.",
+                "RMSE, млн барр.",
+            ],
+        )
+        diff = bench.set_index("model").mae_mmbbl
+        delta = diff["api_news"] - diff["api"]
+        report.paragraph(
+            f"На отложенном периоде с 2023 года добавление двух новостных признаков изменило среднюю абсолютную ошибку на {number(delta, 4)} млн баррелей (новая модель минус базовая). "
+            "Это результат одного временного разбиения для двух агрегатов. Шаблоны и перепечатки определены по всему корпусу, включая последующие публикации. Доступность восстановленных версий текста в момент прогноза документально не установлена."
+        )
+
+    report.heading("10. Выводы для событийного графа")
+    report.paragraph(
+        "Самая крупная потеря материала происходит при получении старых страниц. Вместе со счётчиком новостей стоит хранить долю восстановленных публикаций по издателю и месяцу. Это особенно важно для сравнения стран и для периодов, в которых менялся состав источников."
     )
-    heading("11. Reproduction, provenance and checks")
-    paragraph(
-        "Run <code>MPLCONFIGDIR=/tmp/oil-news-matplotlib .venv/bin/python eda/news_eda.py</code> from the repository root. Open <code>eda/notebooks/08_news_corpus.ipynb</code> for the executed walkthrough. The analyzer reads one country at a time, uses no network, does not retrain the classifier, and writes only derived EDA tables and this report. Seed: 6107. Tables are Parquet plus a CSV review sample; the HTML embeds its figures and can be shared as a single file."
+    report.paragraph(
+        f"Для ручной проверки сохранена выборка из {number(summary['review_rows'])} публикаций. В неё включены случайные строки, заголовки у порога классификатора, сомнительные даты, возможные заглушки и материалы об отчётах. "
+        "Такая схема отбора помогает разбирать ошибки. Чтобы оценить точность по всему корпусу, нужна независимая выборка с известными вероятностями отбора."
     )
-    paragraph(
-        f"Generated UTC: {html.escape(summary['generated_at_utc'])}. Input manifest: {len(manifest):,} files, SHA-256 of sorted path/size/mtime/row metadata <code>{digest}</code>. This fingerprint is metadata-based, not a cryptographic hash of file contents. Inputs changed during analysis: {len(changed)}."
+    report.paragraph(
+        "При подготовке исторической оценки переносите копии одного документа в одну выборку, сохраняйте исходную дату и отдельно фиксируйте подтверждённое время доступности. "
+        "Качество извлечения событий, связей с объектами и прогноза спрэда WTI требует отдельной проверки."
     )
-    sections.append(
-        "<ul>" + "".join(f"<li>{html.escape(s)}</li>" for s in checks) + "</ul>"
+
+    report.heading("11. Воспроизведение и проверки")
+    report.paragraph(
+        "Запустите из корня репозитория при наличии локальных новостных Parquet и распакованного каталога eda/data/processed из processed.zip."
+    )
+    report.code(
+        ".venv/bin/python eda/news_eda.py\n.venv/bin/python eda/execute_notebook.py eda/notebooks/08_news_corpus.ipynb\n.venv/bin/python -m pytest -q tests/eda/test_news_eda.py"
+    )
+    report.paragraph(
+        "Обычный запуск пересчитывает таблицы, графики, Markdown, HTML и JSON. Флаг --cached использует уже рассчитанные таблицы. Производные Parquet, манифест и review_sample.csv находятся в eda/data/derived/news/. "
+        "Для формирования выборки используется seed 6107. Сводка JSON содержит контрольные суммы модуля анализа, метаданных модели и конфигурации регионов."
+    )
+    report.paragraph(
+        f"В манифесте {number(summary['input_file_count'])} входных Parquet, включая три таблицы календаря и данных EIA, API и консенсуса. Размер и время изменения сверены после анализа. "
+        f"SHA-256 отсортированного перечня путей, размеров, времён и числа строк — {summary['manifest_sha256']}. Выполнено проверок — {len(checks)}."
+    )
+    report.md.append("\n".join(f"- {v}." for v in checks))
+    report.sections.append(
+        "<ul>" + "".join(f"<li>{html.escape(v)}.</li>" for v in checks) + "</ul>"
     )
     style = """body{font:16px/1.6 system-ui,sans-serif;color:#202832;background:#fafbf9;margin:0}main{max-width:1240px;margin:auto;padding:48px 30px}h1{font-size:40px;line-height:1.15;margin:0 0 14px}h2{font-size:25px;margin-top:56px;border-top:1px solid #d9ded9;padding-top:24px}p,li{max-width:1080px}li{margin:12px 0}.eyebrow{font-size:13px;color:#527166;letter-spacing:2px;text-transform:uppercase}.metrics{display:flex;gap:16px;flex-wrap:wrap;margin:30px 0}.metrics>div{background:#eaf0ec;border-radius:8px;padding:18px;min-width:165px}.metrics strong{display:block;font-size:29px;color:#175643}.metrics span{font-size:13px}img{width:100%;height:auto}figure{margin:35px 0}figcaption{color:#5a6661;font-size:13px}table{border-collapse:collapse;font-size:12px;width:100%}th{text-align:left;background:#e6ece8;position:sticky;top:0}td,th{padding:8px 10px;border-bottom:1px solid #dce3dd;max-width:420px;overflow-wrap:anywhere}tr:nth-child(even){background:#f0f3f0}.table-wrap{overflow:auto;max-height:700px;margin:25px 0}code{background:#e9edeb;padding:2px 5px;font-size:13px;overflow-wrap:anywhere}@media print{main{padding:0}.table-wrap{max-height:none;overflow:visible}h2{break-after:avoid}figure{break-inside:avoid}}"""
-    output = (
-        f'<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Oil news corpus — EDA</title><style>{style}</style><main><p class="eyebrow">Oil news graph / local collection audit</p><h1>What the interrupted news collection can support</h1>'
-        + "\n".join(sections)
-        + "</main></html>"
+    (ROOT / "docs/news_eda.md").write_text(
+        "\n\n".join(report.md) + "\n", encoding="utf-8"
     )
-    (REPORT / "news_eda.html").write_text(output, encoding="utf-8")
-    (REPORT / "summary.json").write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False) + "\n"
+    (REPORT / "news_eda.html").write_text(
+        f'<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{report.title}</title><style>{style}</style></head><body><main>'
+        + "\n".join(report.sections)
+        + "</main></body></html>\n",
+        encoding="utf-8",
     )
+    payload = json.dumps(summary, indent=2, ensure_ascii=False) + "\n"
+    (REPORT / "summary.json").write_text(payload)
+    (DERIVED / "summary.json").write_text(payload)
+    t["review_sample"].to_csv(DERIVED / "review_sample.csv", index=False)
     return summary
 
 
@@ -1273,9 +1737,41 @@ def run_analysis(*, refresh: bool = True) -> dict:
     if refresh:
         tables = summarize(collect())
         for name, data in tables.items():
-            data.to_parquet(DERIVED / f"{name}.parquet", index=False)
+            data.to_parquet(
+                DERIVED / f"{name}.parquet", index=False, row_group_size=32_768
+            )
     else:
-        tables = {p.stem: pd.read_parquet(p) for p in DERIVED.glob("*.parquet")}
+        if not (DERIVED / "volume_benchmark.parquet").is_file():
+            msg = "Пересчитайте таблицы по исходным файлам командой python eda/news_eda.py"
+            raise FileNotFoundError(msg)
+        article_columns = [
+            "region",
+            "story_id",
+            "date",
+            "date_ok",
+            "host",
+            "language",
+            "chars",
+            "date_shift_days",
+            "text_hash",
+            "duplicate_of",
+            "screened",
+            "candidate_event",
+            "quality_ok",
+            "exact_time_present",
+            "content_warning",
+            "date_disagreement_gt7d",
+            "date_source",
+            "publish_date",
+            "next_release",
+            *["topic_" + key for key in TOPICS],
+        ]
+        tables = {
+            p.stem: pd.read_parquet(
+                p, columns=article_columns if p.stem == "articles" else None
+            )
+            for p in DERIVED.glob("*.parquet")
+        }
     checks = validate_tables(tables)
     figures = make_figures(tables)
     summary = make_report(tables, figures, checks)

@@ -1,27 +1,17 @@
-# EDA не-новостных источников
+# Разведочный анализ нефтяных данных и новостей
 
-**EDA новостного корпуса на этой машине:**
-[`reports/news/news_eda.html`](reports/news/news_eda.html) — самостоятельный отчёт с
-встроенными графиками; [`08_news_corpus`](notebooks/08_news_corpus.ipynb) — выполненный
-ноутбук. Он анализирует локальную многоязычную выгрузку из `data/{raw,interim,processed}/news`,
-а не старый русский датасет из `jup_files/data/02_news_eda.ipynb`.
+## Новостной корпус
+
+В итоговой выгрузке 49 стран и 2 476 150 собранных статей. Отчёт показывает, какие издатели и годы представлены в корпусе, сколько остаётся уникальных текстов и как недельные счётчики соотносятся с сюрпризом запасов США. [Отчёт на русском](../docs/news_eda.md) · [HTML с графиками](reports/news/news_eda.html) · [Выполненный ноутбук 08](notebooks/08_news_corpus.ipynb) · [Сводка JSON](reports/news/summary.json)
+
+Для воспроизведения нужны сохранённые стадии в `data/{raw,interim,processed}/news` и неновостные таблицы в `eda/data/processed/` (распаковка ниже). Из корня репозитория выполните:
 
 ```bash
-# Из корня репозитория; без сети, скачивания статей, GPU и платной разметки
-MPLCONFIGDIR=/tmp/oil-news-matplotlib .venv/bin/python eda/news_eda.py
-# Перестроить отчёт по уже рассчитанным таблицам
-MPLCONFIGDIR=/tmp/oil-news-matplotlib .venv/bin/python eda/news_eda.py --cached
+.venv/bin/python eda/news_eda.py
+.venv/bin/python eda/execute_notebook.py eda/notebooks/08_news_corpus.ipynb
 ```
 
-Код: `news_eda.py`; таблицы, манифест входных файлов и CSV для ручной проверки:
-`eda/data/derived/news/`. Данные там исключены из Git. Отчёт, рисунки и ноутбук
-сохраняются в репозитории. Никакие исходные данные и файлы загрузчика не меняются.
-Не начатые загрузки текстов отличаются от неудачных попыток; отсутствие попытки
-остаётся пропуском, а не нулём новостей. Текстовые темы и кандидаты событий —
-проверяемые словарные признаки, без заявления об измеренной точности извлечения.
-Для привязки к релизам нужна распакованная папка `eda/data/processed/` из
-`processed.zip` (команда распаковки ниже). Обновление кэша таблиц — обычный
-запуск без `--cached`; этот флаг сам по себе не пересчитывает EDA после изменения кода.
+Первый запуск читает исходные Parquet, пересчитывает таблицы, Markdown, HTML, JSON и рисунки. Команда `.venv/bin/python eda/news_eda.py --cached` повторно формирует отчёты и рисунки по уже рассчитанным таблицам. Числа для Markdown и HTML берутся из одного расчёта. Производные Parquet, манифест входных файлов и выборка для ручной проверки находятся в `eda/data/derived/news/` и хранятся локально.
 
 ---
 
@@ -35,7 +25,7 @@ MPLCONFIGDIR=/tmp/oil-news-matplotlib .venv/bin/python eda/news_eda.py --cached
 # из корня репозитория
 unzip -q processed.zip 'processed/*' -x '*/.DS_Store' -d eda/data
 cd eda/notebooks
-uv run jupyter nbconvert --to notebook --execute --inplace 0*.ipynb   # по порядку 01 → 07
+uv run jupyter nbconvert --to notebook --execute --inplace 0[1-7]*.ipynb   # по порядку 01 → 07
 ```
 
 `eda/data/` в `.gitignore`. Ноутбук 04 пишет `eda/data/derived/curve_clean.parquet` (кривая с
